@@ -4,6 +4,9 @@
  * Released under the MIT license, see LICENSE.txt
  */
 
+// This file was created by merging hal2sg.cpp and sg2vg.cpp with
+// a small amount of glue for the interface. 
+
 #include <cstdlib>
 #include <iostream>
 #include <cassert>
@@ -11,6 +14,9 @@
 #include <deque>
 
 #include "sgbuilder.h"
+#include "side2seq.h"
+#include "sg2vgjson.h"
+#include "sgclient.h"
 
 using namespace std;
 using namespace hal;
@@ -49,6 +55,10 @@ static CLParserPtr initParser()
                                "default, the UCSC convention of "
                                "Genome.Sequence is used",
                                false);
+  optionsParser->addOptionFlag("keepCase",
+                               "don't convert all nucleotides to upper case",
+                               false);
+
 
   optionsParser->setDescription("Convert HAL alignment to vg JSON");
 
@@ -64,6 +74,7 @@ int main(int argc, char** argv)
   string targetGenomes;
   bool noAncestors;
   bool onlySequenceNames;
+  bool keepCase;
   try
   {
     optionsParser->parseOptions(argc, argv);
@@ -73,6 +84,7 @@ int main(int argc, char** argv)
     targetGenomes = optionsParser->getOption<string>("targetGenomes");
     noAncestors = optionsParser->getFlag("noAncestors");
     onlySequenceNames = optionsParser->getFlag("onlySequenceNames");
+    keepCase = optionsParser->getFlag("keepCase");
     if (rootGenomeName != "\"\"" && targetGenomes != "\"\"")
     {
       throw hal_exception("--rootGenome and --targetGenomes options are "
@@ -202,6 +214,47 @@ int main(int argc, char** argv)
     // compute all the joins in second pass (and do sanity check
     // on every path in graph)
     sgbuild.computeJoins(!noAncestors);
+
+    // write out the sequence strings in order
+    const SideGraph* sg = sgbuild.getSideGraph();
+    vector<string> sequenceStrings(sg->getNumSequences());
+    for (sg_int_t i = 0; i < sg->getNumSequences(); ++i)
+    {
+      const SGSequence* seq = sg->getSequence(i);
+      sgbuild.getSequenceString(seq, sequenceStrings[i]);
+    }
+
+    // get the paths
+    vector<const Sequence*> halSequences = sgbuild.getHalSequences();
+    vector<Side2Seq::NamedPath> namedPaths;
+    for (size_t i = 0; i < halSequences.size(); ++i)
+    {
+      string pathName = sgbuild.getHalSeqName(halSequences[i]);
+      vector<SGSegment> path;
+      sgbuild.getHalSequencePath(halSequences[i], path);
+      namedPaths.push_back(Side2Seq::NamedPath(pathName, path));
+    }
+    
+    ///////////////////////////////////////////////
+    // this is where we switch from hal2sg to sg2vg
+    ///////////////////////////////////////////////////
+
+    // convert side graph into sequence graph 
+    cerr << "Converting Side Graph to VG Sequence Graph" << endl;
+    Side2Seq converter;
+    converter.init(sg, &sequenceStrings, &namedPaths, !keepCase);
+    converter.convert();
+    
+    const SideGraph* outGraph = converter.getOutGraph();
+    const vector<string>& outBases = converter.getOutBases();
+    const vector<SGClient::NamedPath>& outPaths = converter.getOutPaths();
+  
+    // write to vg json
+    cerr << "Writing VG JSON to stdout" << endl;
+    SG2VGJSON jsonWriter;
+    jsonWriter.init(&cout);
+    jsonWriter.writeGraph(outGraph, outBases, outPaths);
+
     
     //cout << *sgbuild.getSideGraph() << endl;
 

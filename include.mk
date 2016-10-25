@@ -9,13 +9,13 @@ halPath=${halRootPath}/lib
 
 hal2sgPath=${rootPath}/deps/hal2sg
 sg2vgPath=${rootPath}/deps/sg2vg
-
+rapidJsonPath=${sg2vgPath}/rapidjson
 sgExportPath=${hal2sgPath}/sgExport
 
 include  ${sonLibRootPath}/include.mk
 
-cflags += -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${sg2vgPath}
-cppflags += -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${sg2vgPath}
+cflags += -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${sg2vgPath} -I ${rapidJsonPath}/include
+cppflags += -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${sg2vgPath} -I ${rapidJsonPath}/include
 basicLibs = ${hal2sgPath}/libhal2sg.a ${sg2vgPath}/libsg2vg.a ${sgExportPath}/sgExport.a ${halPath}/halLiftover.a ${halPath}/halLib.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a 
 basicLibsDependencies = ${basicLibs}
 
