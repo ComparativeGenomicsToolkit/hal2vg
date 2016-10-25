@@ -229,10 +229,15 @@ int main(int argc, char** argv)
     vector<Side2Seq::NamedPath> namedPaths;
     for (size_t i = 0; i < halSequences.size(); ++i)
     {
-      string pathName = sgbuild.getHalSeqName(halSequences[i]);
-      vector<SGSegment> path;
-      sgbuild.getHalSequencePath(halSequences[i], path);
-      namedPaths.push_back(Side2Seq::NamedPath(pathName, path));
+      if (halSequences[i]->getGenome()->getNumChildren() == 0 ||
+          !noAncestors)
+      {
+        string pathName = sgbuild.getHalSeqName(halSequences[i]);
+      
+        vector<SGSegment> path;
+        sgbuild.getHalSequencePath(halSequences[i], path);
+        namedPaths.push_back(Side2Seq::NamedPath(pathName, path));
+      }
     }
     
     ///////////////////////////////////////////////
