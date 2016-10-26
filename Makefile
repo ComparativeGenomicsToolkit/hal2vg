@@ -19,6 +19,18 @@ cleanAll :
 hal2vg.o : hal2vg.cpp  ${sidegraphInc} ${basicLibsDependencies}
 	${cpp} ${cppflags} -I . hal2vg.cpp -c
 
+${sonLibPath}/sonLib.a :
+	cd deps/sonLib && make
+
+${halPath}/halLib.a : ${sonLibPath}/sonLib.a
+	cd deps/hal && make
+
+${hal2sgPath}/libhal2sg.a : ${halPath}/halLib.a
+	cd deps/hal2sg && make
+
+${sg2vgPath}/libsg2vg.a :
+	cd deps/sg2vg && make
+
 hal2vg :  hal2vg.o ${basicLibsDependencies}
 	${cpp} ${cppflags} hal2vg.o ${basicLibs}  -o hal2vg 
 
