@@ -10,13 +10,13 @@ See also:
 
 ## To do:
 * More testing (though sanity checks built into hal2sg and sg2vg passing on lots of data so far).
-* Repackage as part of Cacuts or vg?
+* Repackage as part of Cactus or vg?
 * Output protobuf directly?
 * Profile on very large graphs
 
 ## Algorithm
 
-This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-memory version of the GA4GH Side Graph format, then exports that to vg.  The main difference is that it couts out the need to go through the SQL graph server format.  All dependencies are included as submodules. 
+This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-memory version of the GA4GH Side Graph format, then exports that to vg.  The main difference is that it removes the need to go through the SQL graph server format as an intermediate.  All dependencies are included as submodules. 
 
 ## Instructions
 
