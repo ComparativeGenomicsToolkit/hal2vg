@@ -1,12 +1,12 @@
 [submodule "deps/hal"]
 	path = deps/hal
-	url = git@github.com:glennhickey/hal.git
+	url = https://github.com/glennhickey/hal.git
 [submodule "deps/sonLib"]
 	path = deps/sonLib
-	url = git@github.com:benedictpaten/sonLib.git
+	url = https://github.com/benedictpaten/sonLib.git
 [submodule "deps/hal2sg"]
 	path = deps/hal2sg
-	url = git@github.com:glennhickey/hal2sg.git
+	url = https://github.com/glennhickey/hal2sg.git
 [submodule "deps/sg2vg"]
 	path = deps/sg2vg
-	url = git@github.com:glennhickey/sg2vg.git
+	url = https://github.com/glennhickey/sg2vg.git
