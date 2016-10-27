@@ -239,6 +239,10 @@ int main(int argc, char** argv)
         namedPaths.push_back(Side2Seq::NamedPath(pathName, path));
       }
     }
+
+    // destroy the hal alignment to save a bit on memory
+    alignment = AlignmentConstPtr();
+    sgbuild.clear_except_sg();
     
     ///////////////////////////////////////////////
     // this is where we switch from hal2sg to sg2vg
