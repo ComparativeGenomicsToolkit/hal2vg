@@ -30,6 +30,6 @@ To run the converter:
 
 or to go directly to vg:
 
-     hal2vg input.hal | vg view -Jv > output.vg
+     hal2vg input.hal | vg view -Jv - > output.vg
 
 To see all the options, run with no args or use `--help`.
