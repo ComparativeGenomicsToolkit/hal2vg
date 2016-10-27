@@ -253,6 +253,11 @@ int main(int argc, char** argv)
     Side2Seq converter;
     converter.init(sg, &sequenceStrings, &namedPaths, !keepCase);
     converter.convert();
+
+    // free up the sidegraph from sgbuild because it's no longer
+    // needed (and will leak if we don't do so)
+    delete sg;
+    sg = NULL;
     
     const SideGraph* outGraph = converter.getOutGraph();
     const vector<string>& outBases = converter.getOutBases();
