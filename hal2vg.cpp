@@ -58,7 +58,9 @@ static CLParserPtr initParser()
   optionsParser->addOptionFlag("keepCase",
                                "don't convert all nucleotides to upper case",
                                false);
-
+  optionsParser->addOption("chop",
+                           "cut vg output nodes so they are at most this many bases",
+                           1000);
 
   optionsParser->setDescription("Convert HAL alignment to vg JSON");
 
@@ -75,6 +77,7 @@ int main(int argc, char** argv)
   bool noAncestors;
   bool onlySequenceNames;
   bool keepCase;
+  int chop;
   try
   {
     optionsParser->parseOptions(argc, argv);
@@ -85,6 +88,7 @@ int main(int argc, char** argv)
     noAncestors = optionsParser->getFlag("noAncestors");
     onlySequenceNames = optionsParser->getFlag("onlySequenceNames");
     keepCase = optionsParser->getFlag("keepCase");
+    chop = optionsParser->getOption<int>("chop");
     if (rootGenomeName != "\"\"" && targetGenomes != "\"\"")
     {
       throw hal_exception("--rootGenome and --targetGenomes options are "
@@ -251,7 +255,8 @@ int main(int argc, char** argv)
     // convert side graph into sequence graph 
     cerr << "Converting Side Graph to VG Sequence Graph" << endl;
     Side2Seq converter;
-    converter.init(sg, &sequenceStrings, &namedPaths, !keepCase);
+    converter.init(sg, &sequenceStrings, &namedPaths, !keepCase,
+                   false, "", chop);
     converter.convert();
 
     // free up the sidegraph from sgbuild because it's no longer
