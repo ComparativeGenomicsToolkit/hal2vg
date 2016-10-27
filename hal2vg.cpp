@@ -230,7 +230,7 @@ int main(int argc, char** argv)
 
     // get the paths
     vector<const Sequence*> halSequences = sgbuild.getHalSequences();
-    vector<Side2Seq::NamedPath> namedPaths;
+    vector<SGNamedPath> namedPaths;
     for (size_t i = 0; i < halSequences.size(); ++i)
     {
       if (halSequences[i]->getGenome()->getNumChildren() == 0 ||
@@ -240,7 +240,7 @@ int main(int argc, char** argv)
       
         vector<SGSegment> path;
         sgbuild.getHalSequencePath(halSequences[i], path);
-        namedPaths.push_back(Side2Seq::NamedPath(pathName, path));
+        namedPaths.push_back(SGNamedPath(pathName, path));
       }
     }
 
@@ -266,7 +266,7 @@ int main(int argc, char** argv)
     
     const SideGraph* outGraph = converter.getOutGraph();
     const vector<string>& outBases = converter.getOutBases();
-    const vector<SGClient::NamedPath>& outPaths = converter.getOutPaths();
+    const vector<SGNamedPath>& outPaths = converter.getOutPaths();
   
     // write to vg json
     cerr << "Writing VG JSON to stdout" << endl;
