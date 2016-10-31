@@ -272,8 +272,12 @@ int main(int argc, char** argv)
     cerr << "Writing VG JSON to stdout" << endl;
     SG2VGJSON jsonWriter;
     jsonWriter.init(&cout);
-    jsonWriter.writeGraph(outGraph, outBases, outPaths);
-
+    // chunking parameters designed to keep well under 65M protobuf
+    // limit. 
+    jsonWriter.writeChunkedGraph(outGraph, outBases, outPaths,
+                                 20000000 / chop,
+                                 100000,
+                                 100000);
     
     //cout << *sgbuild.getSideGraph() << endl;
 
