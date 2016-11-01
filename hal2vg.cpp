@@ -261,7 +261,7 @@ int main(int argc, char** argv)
     cerr << "Converting Side Graph to VG Sequence Graph" << endl;
     Side2Seq converter;
     converter.init(sg, &sequenceStrings, &namedPaths, !keepCase,
-                   false, "", chop);
+                   false, "", chop, true);
     converter.convert();
 
     // free up the sidegraph from sgbuild because it's no longer
