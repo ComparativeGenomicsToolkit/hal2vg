@@ -24,8 +24,8 @@ sgExportPath=${hal2sgPath}/sgExport
 include  ${sonLibRootPath}/include.mk
 
 cflags += -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} 
-cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${vgPath}/include 
-basicLibs = ${hal2sgPath}/libhal2sg.a ${sg2vgPath}/libsg2vg.a ${sgExportPath}/sgExport.a ${halPath}/halLiftover.a ${halPath}/halLib.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a 
+cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${VGDIR}/include 
+basicLibs = ${hal2sgPath}/libhal2sg.a ${sgExportPath}/sgExport.a ${halPath}/halLiftover.a ${halPath}/halLib.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a 
 basicLibsDependencies = ${basicLibs}
 
 # hdf5 compilation is done through its wrappers.
