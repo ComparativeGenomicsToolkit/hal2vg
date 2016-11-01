@@ -2,21 +2,23 @@
 rootPath = ./
 include ./include.mk
 
-sidegraphInc = ${sgExportPath}/sidegraph.h ${sgExportPath}/sgcommon.h ${sgExportPath}/sgsequence.h ${sgExportPath}/sgposition.h ${sgExportPath}/sgside.h ${sgExportPath}/sgjoin.h ${sgExportPath}/sgsegment.h ${sgExportPath}/sglookup.h ${hal2sgPath}/sgbuilder.h ${sg2vgPath}/sg2vgjson.h
+sidegraphInc = ${sgExportPath}/sidegraph.h ${sgExportPath}/sgcommon.h ${sgExportPath}/sgsequence.h ${sgExportPath}/sgposition.h ${sgExportPath}/sgside.h ${sgExportPath}/sgjoin.h ${sgExportPath}/sgsegment.h ${sgExportPath}/sglookup.h ${hal2sgPath}/sgbuilder.h ${sgExportPath}/side2seq.h
 
 all : hal2vg
 
 clean : 
-	rm -f hal2vg hal2vg.o
+	rm -f hal2vg hal2vg.o sg2vgproto.o
 
 cleanAll :
 	rm -f hal2vg hal2vg.o
 	cd deps/sonLib && make clean
 	cd deps/hal && make clean
 	cd deps/hal2sg && make clean
-	cd deps/sg2vg && make clean
 
-hal2vg.o : hal2vg.cpp  ${sidegraphInc} ${basicLibsDependencies}
+sg2vgproto.o : sg2vgproto.cpp sg2vgproto.h ${sidegraphInc} ${basicLibsDependencies}
+	${cpp} ${cppflags} -I . sg2vgproto.cpp -c
+
+hal2vg.o : hal2vg.cpp sg2vgproto.h ${sidegraphInc} ${basicLibsDependencies}
 	${cpp} ${cppflags} -I . hal2vg.cpp -c
 
 ${sonLibPath}/sonLib.a :
@@ -28,9 +30,7 @@ ${halPath}/halLib.a : ${sonLibPath}/sonLib.a
 ${hal2sgPath}/libhal2sg.a : ${halPath}/halLib.a
 	cd deps/hal2sg && make
 
-${sg2vgPath}/libsg2vg.a :
-	cd deps/sg2vg && make
-
-hal2vg :  hal2vg.o ${basicLibsDependencies}
-	${cpp} ${cppflags} hal2vg.o ${basicLibs}  -o hal2vg 
+hal2vg : hal2vg.o sg2vgproto.o ${basicLibsDependencies}
+	cd deps/hal2sg && make
+	${cpp} ${cppflags} hal2vg.o sg2vgproto.o ${basicLibs}  -o hal2vg 
 

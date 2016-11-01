@@ -7,6 +7,3 @@
 [submodule "deps/hal2sg"]
 	path = deps/hal2sg
 	url = https://github.com/glennhickey/hal2sg.git
-[submodule "deps/sg2vg"]
-	path = deps/sg2vg
-	url = https://github.com/glennhickey/sg2vg.git

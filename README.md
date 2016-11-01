@@ -10,13 +10,12 @@ See also:
 
 ## To do:
 * More testing (though sanity checks built into hal2sg and sg2vg passing on lots of data so far).
-* Repackage as part of Cactus or vg?
-* Output protobuf directly?
+* Repackage as part of Progressive Cactus
 * Profile on very large graphs
 
 ## Algorithm
 
-This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-memory version of the GA4GH Side Graph format, then exports that to vg.  The main difference is that it removes the need to go through the SQL graph server format as an intermediate.  All dependencies except HDF5 are included as submodules. 
+This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-memory version of the GA4GH Side Graph format, then exports that to vg.  The main difference is that it removes the need to go through the SQL graph server format as an intermediate.  All dependencies except HDF5 and VG are included as submodules. 
 
 ## Instructions
 
@@ -24,12 +23,10 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
      git clone https://github.com/glennhickey/hal2vg.git --recursive
 
+**VG Path:** edit `include.mk` so that `VGDIR` points to that path where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
+
 To run the converter:
 
-	  hal2vg input.hal > output.json
-
-or to go directly to vg:
-
-     hal2vg input.hal | vg view -Jv - > output.vg
+	  hal2vg input.hal > output.vg
 
 To see all the options, run with no args or use `--help`.

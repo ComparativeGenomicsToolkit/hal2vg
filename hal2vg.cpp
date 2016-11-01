@@ -15,8 +15,8 @@
 
 #include "sgbuilder.h"
 #include "side2seq.h"
-#include "sg2vgjson.h"
-#include "sgclient.h"
+#include "sg2vgproto.h"
+#include "vg.pb.h"
 
 using namespace std;
 using namespace hal;
@@ -61,6 +61,9 @@ static CLParserPtr initParser()
   optionsParser->addOption("chop",
                            "cut vg output nodes so they are at most this many bases",
                            1000);
+  optionsParser->addOption("protoChunk",
+                           "maximum size (approx) of output protobuf chunks (bytes)",
+                           30000000);
 
   optionsParser->setDescription("Convert HAL alignment to vg JSON");
 
@@ -78,6 +81,7 @@ int main(int argc, char** argv)
   bool onlySequenceNames;
   bool keepCase;
   int chop;
+  int protoChunk;
   try
   {
     optionsParser->parseOptions(argc, argv);
@@ -89,10 +93,15 @@ int main(int argc, char** argv)
     onlySequenceNames = optionsParser->getFlag("onlySequenceNames");
     keepCase = optionsParser->getFlag("keepCase");
     chop = optionsParser->getOption<int>("chop");
+    protoChunk = optionsParser->getOption<int>("protoChunk");
     if (rootGenomeName != "\"\"" && targetGenomes != "\"\"")
     {
       throw hal_exception("--rootGenome and --targetGenomes options are "
                           "mutually exclusive");
+    }
+    if (protoChunk > 60000000)
+    {
+      cerr << "Warning: --protoChunk parameter set dangerously high." << endl;
     }
   }
   catch(exception& e)
@@ -248,10 +257,6 @@ int main(int argc, char** argv)
     alignment = AlignmentConstPtr();
     sgbuild.clear_except_sg();
     
-    ///////////////////////////////////////////////
-    // this is where we switch from hal2sg to sg2vg
-    ///////////////////////////////////////////////////
-
     // convert side graph into sequence graph 
     cerr << "Converting Side Graph to VG Sequence Graph" << endl;
     Side2Seq converter;
@@ -267,18 +272,24 @@ int main(int argc, char** argv)
     const SideGraph* outGraph = converter.getOutGraph();
     const vector<string>& outBases = converter.getOutBases();
     const vector<SGNamedPath>& outPaths = converter.getOutPaths();
-  
-    // write to vg json
-    cerr << "Writing VG JSON to stdout" << endl;
-    SG2VGJSON jsonWriter;
-    jsonWriter.init(&cout);
-    // chunking parameters designed to keep well under 65M protobuf
-    // limit. 
-    jsonWriter.writeChunkedGraph(outGraph, outBases, outPaths,
-                                 20000000 / chop,
-                                 100000,
-                                 100000);
+
     
+    // write to vg proto
+    cerr << "Writing VG protobuf to stdout" << endl;
+    SG2VGProto vgWriter;
+    vgWriter.init(&cout);
+    //vgWriter.writeGraph(outGraph, outBases, outPaths);
+    
+    // chunking parameters designed to keep well under protobuf limit
+    int nodeCount = max(1UL, protoChunk / (sizeof(vg::Node) + chop));
+    int edgeCount = max(1UL, protoChunk / sizeof(vg::Edge));
+    // very conservative here assuming avg path size of 1
+    int segmentCount = max(1UL, protoChunk /
+                           (sizeof(vg::Mapping) + sizeof(vg::Path)));
+    
+    vgWriter.writeChunkedGraph(outGraph, outBases, outPaths,
+                               nodeCount, edgeCount, segmentCount);
+
     //cout << *sgbuild.getSideGraph() << endl;
 
   }
