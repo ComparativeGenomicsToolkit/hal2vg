@@ -1,7 +1,7 @@
 # hal2vg
 Prototype code for converting [HAL](https://github.com/glennhickey/hal) to [vg](https://github.com/vgteam/vg).
 
-(c) 2016 Glenn Hickey. See [LICENSE](https://github.com/glennhickey/hal2sg/blob/development/LICENSE) for details.
+(c) 2016 Glenn Hickey. See [LICENSE](https://github.com/glennhickey/hal2vg/blob/master/LICENSE) for details.
 
 See also:
 * [hal2sg](https://github.com/glennhickey/hal2sg): Convert  [HAL](https://github.com/glennhickey/hal) (output by [Cactus](https://github.com/glennhickey/progressiveCactus) and [CAMEL](https://github.com/adamnovak/sequence-graphs)) to [Side Graph SQL](https://github.com/ga4gh/schemas/wiki/Human-Genome-Variation-Reference-(HGVR)-Pilot-Project#graph-format)
@@ -19,11 +19,15 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
 ## Instructions
 
-**Cloning:** Don't forget to clone submodules:
+**Cloning:** Don't forget to clone submodules with the `--recursive` option:
 
      git clone https://github.com/glennhickey/hal2vg.git --recursive
 
-**VG Path:** edit `include.mk` so that `VGDIR` points to that path where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
+**Setting your VG path:** Edit `include.mk` so that `VGDIR` points to that path where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
+
+**Compiling:**
+
+     make
 
 To run the converter:
 
