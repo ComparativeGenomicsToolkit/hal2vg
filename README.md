@@ -23,7 +23,7 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
      git clone https://github.com/glennhickey/hal2vg.git --recursive
 
-**Setting your VG path:** Edit `include.mk` so that `VGDIR` points to that path where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
+**Setting your VG path:** Edit `include.mk` so that `VGDIR` points to where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
 
 **Compiling:**
 
