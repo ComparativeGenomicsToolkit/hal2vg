@@ -216,7 +216,7 @@ int main(int argc, char** argv)
     }
     SGBuilder sgbuild;
     sgbuild.init(alignment, rootGenome, false, isCamelHal(alignment),
-                 onlySequenceNames);
+                 onlySequenceNames, true);
     
     // add the genomes in the breadth first order
     for (size_t i = 0; i < breadthFirstOrdering.size(); ++i)
