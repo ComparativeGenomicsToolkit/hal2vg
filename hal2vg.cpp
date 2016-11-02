@@ -65,7 +65,7 @@ static CLParserPtr initParser()
                            "maximum size (approx) of output protobuf chunks (bytes)",
                            30000000);
 
-  optionsParser->setDescription("Convert HAL alignment to vg JSON");
+  optionsParser->setDescription("Convert HAL alignment to vg protobuf");
 
   return optionsParser;
 }
