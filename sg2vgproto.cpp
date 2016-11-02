@@ -139,8 +139,7 @@ void SG2VGProto::writeChunkedGraph(const SideGraph* sg,
       }
 
       // iterate paths
-      for (int count = 0; count < pathSegsPerChunk && curPath < paths.size();
-           ++curPath)
+      for (int count = 0; count < pathSegsPerChunk && curPath < paths.size();)
       {
         const SGNamedPath& path = paths[curPath];
         if (curSegment == 0 && pathSegsPerChunk - count >= path.second.size())
@@ -148,11 +147,12 @@ void SG2VGProto::writeChunkedGraph(const SideGraph* sg,
           // we're adding entire path
           addPath(path.first, path.second);
           count += path.second.size();
+          curSegment += path.second.size();
         }
         else
         {
           // we need to chop path
-          while (curSegment < path.second.size())
+          while (curSegment < path.second.size() && count < pathSegsPerChunk)
           {
             int pathChunkSize = min(pathSegsPerChunk,
                                     (int)path.second.size() - curSegment);
@@ -164,7 +164,12 @@ void SG2VGProto::writeChunkedGraph(const SideGraph* sg,
             curSegment += pathChunkSize;
           }
         }
-        curSegment = 0;
+        // finished writing path, reset to segment zero on next path
+        if (curSegment >= path.second.size())
+        {
+          curSegment = 0;
+          ++curPath;
+        }
       }
     }    
     return _graph;
