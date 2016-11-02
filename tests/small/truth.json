@@ -1,0 +1,239 @@
+{
+  "node": [
+    {
+      "sequence": "G",
+      "id": 1
+    },
+    {
+      "sequence": "C",
+      "id": 2
+    },
+    {
+      "sequence": "A",
+      "id": 3
+    },
+    {
+      "sequence": "GC",
+      "id": 4
+    },
+    {
+      "sequence": "A",
+      "id": 5
+    },
+    {
+      "sequence": "G",
+      "id": 6
+    },
+    {
+      "sequence": "AA",
+      "id": 7
+    },
+    {
+      "sequence": "T",
+      "id": 8
+    },
+    {
+      "sequence": "T",
+      "id": 9
+    }
+  ],
+  "path": [
+    {
+      "name": "cat.3",
+      "mapping": [
+        {
+          "position": {
+            "node_id": 1
+          },
+          "rank": 1
+        },
+        {
+          "position": {
+            "node_id": 9
+          },
+          "rank": 2
+        },
+        {
+          "position": {
+            "node_id": 3
+          },
+          "rank": 3
+        },
+        {
+          "position": {
+            "node_id": 8,
+            "is_reverse": true
+          },
+          "rank": 4
+        },
+        {
+          "position": {
+            "node_id": 7,
+            "is_reverse": true
+          },
+          "rank": 5
+        },
+        {
+          "position": {
+            "node_id": 5,
+            "is_reverse": true
+          },
+          "rank": 6
+        }
+      ]
+    },
+    {
+      "name": "chimp.2",
+      "mapping": [
+        {
+          "position": {
+            "node_id": 1
+          },
+          "rank": 1
+        },
+        {
+          "position": {
+            "node_id": 2
+          },
+          "rank": 2
+        },
+        {
+          "position": {
+            "node_id": 3
+          },
+          "rank": 3
+        },
+        {
+          "position": {
+            "node_id": 4
+          },
+          "rank": 4
+        },
+        {
+          "position": {
+            "node_id": 5
+          },
+          "rank": 5
+        },
+        {
+          "position": {
+            "node_id": 6
+          },
+          "rank": 6
+        },
+        {
+          "position": {
+            "node_id": 8
+          },
+          "rank": 7
+        }
+      ]
+    },
+    {
+      "name": "human.1",
+      "mapping": [
+        {
+          "position": {
+            "node_id": 1
+          },
+          "rank": 1
+        },
+        {
+          "position": {
+            "node_id": 2
+          },
+          "rank": 2
+        },
+        {
+          "position": {
+            "node_id": 3
+          },
+          "rank": 3
+        },
+        {
+          "position": {
+            "node_id": 4
+          },
+          "rank": 4
+        },
+        {
+          "position": {
+            "node_id": 5
+          },
+          "rank": 5
+        },
+        {
+          "position": {
+            "node_id": 6
+          },
+          "rank": 6
+        },
+        {
+          "position": {
+            "node_id": 7
+          },
+          "rank": 7
+        },
+        {
+          "position": {
+            "node_id": 8
+          },
+          "rank": 8
+        }
+      ]
+    }
+  ],
+  "edge": [
+    {
+      "from": 1,
+      "to": 2
+    },
+    {
+      "from": 1,
+      "to": 9
+    },
+    {
+      "from": 2,
+      "to": 3
+    },
+    {
+      "to_end": true,
+      "from": 3,
+      "from_start": true,
+      "to": 9
+    },
+    {
+      "from": 3,
+      "to": 4
+    },
+    {
+      "to_end": true,
+      "from": 3,
+      "to": 8
+    },
+    {
+      "from": 4,
+      "to": 5
+    },
+    {
+      "from": 5,
+      "to": 6
+    },
+    {
+      "from": 5,
+      "to": 7
+    },
+    {
+      "from": 6,
+      "to": 7
+    },
+    {
+      "from": 6,
+      "to": 8
+    },
+    {
+      "from": 7,
+      "to": 8
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+##maf version=1
+
+# SNP
+a score=0 mafExtractor_splicedBlock=true splice_id=1_0
+s human.1           0  3 +  10 GCA
+s chimp.2       0  3 +  8 GCA
+s cat.3    0  3 +  7 GTA
+
+# Indel and strand change
+a score=0 mafExtractor_splicedBlock=true splice_id=1_0
+s human.1           3  7 +  10 GCAGAAT
+s chimp.2       3  5 +  8 GCAG--T
+s cat.3    0  4 -  7 --A-AAT
+
+
+
