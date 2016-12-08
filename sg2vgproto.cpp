@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <cmath>
 
 #include "sg2vgproto.h"
 #include "stream.hpp"
