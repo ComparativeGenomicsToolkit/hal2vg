@@ -58,9 +58,6 @@ static CLParserPtr initParser()
   optionsParser->addOptionFlag("keepCase",
                                "don't convert all nucleotides to upper case",
                                false);
-  optionsParser->addOption("chop",
-                           "cut vg output nodes so they are at most this many bases",
-                           1000);
   optionsParser->addOption("protoChunk",
                            "maximum size (approx) of output protobuf chunks (bytes)",
                            30000000);
@@ -80,7 +77,11 @@ int main(int argc, char** argv)
   bool noAncestors;
   bool onlySequenceNames;
   bool keepCase;
-  int chop;
+  // Hardcode a large chop value here.  The logic as implemented
+  // is not efficient enough to chop into more standard node size (<1000) for
+  // larger graphs.  So we only use to make sure we don't overflow protobuf.
+  // Todo: tune down?
+  const int chop = 1000000;
   int protoChunk;
   try
   {
@@ -92,7 +93,6 @@ int main(int argc, char** argv)
     noAncestors = optionsParser->getFlag("noAncestors");
     onlySequenceNames = optionsParser->getFlag("onlySequenceNames");
     keepCase = optionsParser->getFlag("keepCase");
-    chop = optionsParser->getOption<int>("chop");
     protoChunk = optionsParser->getOption<int>("protoChunk");
     if (rootGenomeName != "\"\"" && targetGenomes != "\"\"")
     {
