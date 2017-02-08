@@ -50,6 +50,10 @@ static CLParserPtr initParser()
                                " to set a non-ancestral genome as the reference"
                                " because the default reference is the root.", 
                                false);
+  optionsParser->addOptionFlag("refDupes",
+                               "process duplications in reference genome, which will"
+                               " be written as vg cycles.  This is off by default.",
+                               false);
   optionsParser->addOptionFlag("onlySequenceNames",
                                "use only sequence names for output names.  By "
                                "default, the UCSC convention of "
@@ -75,6 +79,7 @@ int main(int argc, char** argv)
   string rootGenomeName;
   string targetGenomes;
   bool noAncestors;
+  bool refDupes;
   bool onlySequenceNames;
   bool keepCase;
   // Hardcode a large chop value here.  The logic as implemented
@@ -91,6 +96,7 @@ int main(int argc, char** argv)
     rootGenomeName = optionsParser->getOption<string>("rootGenome");
     targetGenomes = optionsParser->getOption<string>("targetGenomes");
     noAncestors = optionsParser->getFlag("noAncestors");
+    refDupes = optionsParser->getFlag("refDupes");    
     onlySequenceNames = optionsParser->getFlag("onlySequenceNames");
     keepCase = optionsParser->getFlag("keepCase");
     protoChunk = optionsParser->getOption<int>("protoChunk");
@@ -215,7 +221,7 @@ int main(int argc, char** argv)
            << "from children" << endl;
     }
     SGBuilder sgbuild;
-    sgbuild.init(alignment, rootGenome, false, isCamelHal(alignment),
+    sgbuild.init(alignment, rootGenome, refDupes, isCamelHal(alignment),
                  onlySequenceNames, true);
     
     // add the genomes in the breadth first order
