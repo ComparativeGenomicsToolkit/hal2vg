@@ -24,7 +24,7 @@ sgExportPath=${hal2sgPath}/sgExport
 include  ${sonLibRootPath}/include.mk
 
 cflags += -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} 
-cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${VGDIR}/include 
+cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${VGDIR}/include -UNDEBUG
 basicLibs = ${hal2sgPath}/libhal2sg.a ${sgExportPath}/sgExport.a ${halPath}/halLiftover.a ${halPath}/halLib.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a 
 basicLibsDependencies = ${basicLibs}
 
