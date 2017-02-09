@@ -157,6 +157,12 @@ int main(int argc, char** argv)
           targetVec.push_back(*i);
         }
       }
+      // Throw in the root if empty (ie case where reference is a leaf
+      // and there are no other leaves)
+      if (targetVec.size() == 1 && targetVec[0] != rootGenome)
+      {
+        targetVec.push_back(rootGenome);
+      }
     }
     // target genomes pulled from list.  
     else
