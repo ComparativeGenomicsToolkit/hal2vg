@@ -25,6 +25,9 @@ static bool isCamelHal(AlignmentConstPtr aligment);
 static void breadthFirstGenomeSearch(const Genome* reference,
                                      const vector<const Genome*>& targets,
                                      vector<const Genome*>& outTraversal);
+static set<const Sequence*> parseRefSequences(
+  const Genome* refGenome, const string& refSequenceFilePath);
+
 
 static CLParserPtr initParser()
 {
@@ -65,6 +68,10 @@ static CLParserPtr initParser()
   optionsParser->addOption("protoChunk",
                            "maximum size (approx) of output protobuf chunks (bytes)",
                            30000000);
+  optionsParser->addOption("refSequenceFile",
+                           "white-space delimited list of sequence names in the "
+                           "reference genome which will *not* be collapsed by duplications."
+                           "  Overrides --refDupes", "\"\"");
 
   optionsParser->setDescription("Convert HAL alignment to vg protobuf");
 
@@ -88,6 +95,7 @@ int main(int argc, char** argv)
   // Todo: tune down?
   const int chop = 1000000;
   int protoChunk;
+  string refSequenceFile;
   try
   {
     optionsParser->parseOptions(argc, argv);
@@ -100,6 +108,7 @@ int main(int argc, char** argv)
     onlySequenceNames = optionsParser->getFlag("onlySequenceNames");
     keepCase = optionsParser->getFlag("keepCase");
     protoChunk = optionsParser->getOption<int>("protoChunk");
+    refSequenceFile = optionsParser->getOption<string>("refSequenceFile");
     if (rootGenomeName != "\"\"" && targetGenomes != "\"\"")
     {
       throw hal_exception("--rootGenome and --targetGenomes options are "
@@ -108,6 +117,11 @@ int main(int argc, char** argv)
     if (protoChunk > 60000000)
     {
       cerr << "Warning: --protoChunk parameter set dangerously high." << endl;
+    }
+    if (refSequenceFile != "\"\"" && refGenomeName == "\"\"")
+    {
+      throw hal_exception("--refSequenceFile must be used in conjunction "
+                          " with --refGenome");
     }
   }
   catch(exception& e)
@@ -182,6 +196,7 @@ int main(int argc, char** argv)
 
     // open the reference genome (root genome if unspecified)
     const Genome* refGenome = NULL;
+    set<const Sequence*> refSequences;
     if (refGenomeName != "\"\"")
     {
       refGenome = alignment->openGenome(refGenomeName);
@@ -196,6 +211,12 @@ int main(int argc, char** argv)
       if (getLowestCommonAncestor(genomeSet) != rootGenome)
       {
         throw hal_exception(string("reference genome must be under root"));
+      }
+
+      if (refSequenceFile != "\"\"")
+      {
+        refSequences = parseRefSequences(refGenome, refSequenceFile);
+        refDupes = true;
       }
     }
     else
@@ -233,7 +254,8 @@ int main(int argc, char** argv)
     // add the genomes in the breadth first order
     for (size_t i = 0; i < breadthFirstOrdering.size(); ++i)
     {
-      sgbuild.addGenome(breadthFirstOrdering[i]);
+      sgbuild.addGenome(breadthFirstOrdering[i], NULL,
+                        i == 0 ? &refSequences : NULL);
     }
 
     // compute all the joins in second pass (and do sanity check
@@ -388,4 +410,33 @@ void breadthFirstGenomeSearch(const Genome* reference,
     }
     flagged.insert(genome);
   }
+}
+
+set<const Sequence*> parseRefSequences(const Genome* refGenome,
+                                       const string& refSequenceFilePath)
+{
+  ifstream refSequenceFile(refSequenceFilePath.c_str());
+  if (!refSequenceFile)
+  {
+    throw hal_exception("Unable to load reference sequences file: " +
+                        refSequenceFilePath);
+  }
+  set<const Sequence*> refSet;
+  while (refSequenceFile)
+  {
+    string buf;
+    refSequenceFile >> buf;
+    if (!buf.empty())
+    {
+      const Sequence* seq = refGenome->getSequence(buf);
+      if (seq == NULL)
+      {
+        throw hal_exception("Sequence " + buf + ", specified in " +
+                            refSequenceFilePath + ", not found in reference genome " +
+                            refGenome->getName());
+      }
+      refSet.insert(seq);
+    }
+  }
+  return refSet;
 }
