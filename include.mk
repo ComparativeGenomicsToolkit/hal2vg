@@ -8,7 +8,8 @@ VGDIR=../vg
 VGLIBDIR=$(VGDIR)/lib
 LIBPROTOBUF=$(VGLIBDIR)/libprotobuf.a
 LIBVG=$(VGLIBDIR)/libvg.a
-VGLIBS=$(LIBVG) $(LIBPROTOBUF)
+LIBXG=$(VGLIBDIR)/libxg.a
+VGLIBS=$(LIBVG) $(LIBXG) $(LIBPROTOBUF)
 
 sonLibRootPath=deps/sonLib
 sonLibPath=${sonLibRootPath}/lib
