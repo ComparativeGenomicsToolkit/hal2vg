@@ -17,6 +17,36 @@ See also:
 
 This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-memory version of the GA4GH Side Graph format, then exports that to vg.  The main difference is that it removes the need to go through the SQL graph server format as an intermediate.  All dependencies except HDF5 and VG are included as submodules. 
 
+## Installing Dependencies
+
+#### HDF5 1.10.1 with C++ API enabled
+
+* Local install from source into DIR (do not need root password)  
+
+     `mkdir DIR/hdf5`
+     `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`
+	  `tar xzf  hdf5-1.10.1.tar.gz`  
+     `cd hdf5-1.10.1`  
+     `./configure --enable-cxx --prefix DIR/hdf5`  
+     `make && make install` 
+    
+     Before building HAL, update the following environment variables:  
+   
+     `export PATH=DIR/hdf5/bin:${PATH}`  
+     `export h5prefix=-prefix=DIR/hdf5`  
+
+* From [Source](http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/):
+
+     `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`  
+	  `tar xzf  hdf5-1.10.1.tar.gz`  
+     `cd hdf5-1.10.1`  
+	  `./configure --enable-cxx`  
+	  `make && make install`  
+
+* Using [MacPorts](http://www.macports.org/):   
+
+    sudo port install hdf5 @1.10.1 +cxx
+
 ## Instructions
 
 **Cloning:** Don't forget to clone submodules with the `--recursive` option:
