@@ -6,10 +6,10 @@ sidegraphInc = ${sgExportPath}/sidegraph.h ${sgExportPath}/sgcommon.h ${sgExport
 
 all : hal2vg
 
-clean : 
+cleanFast : 
 	rm -f hal2vg hal2vg.o sg2vgproto.o
 
-cleanAll :
+clean :
 	rm -f hal2vg hal2vg.o
 	cd deps/sonLib && make clean
 	cd deps/hal && make clean
