@@ -1,0 +1,14 @@
+(((((DBVPG6044,SK1),(YPS128,Y12)),UWOPS034614),(DBVPG6765,S288c)):10,((CBS432,N44),((YPS138,UFRJ50816),UWOPS919171)));
+
+CBS432 /hive/users/hickey/cactus_yeast/yeast_chrom/CBS432.CHROM.fa
+DBVPG6044 /hive/users/hickey/cactus_yeast/yeast_chrom/DBVPG6044.CHROM.fa
+DBVPG6765 /hive/users/hickey/cactus_yeast/yeast_chrom/DBVPG6765.CHROM.fa
+N44 /hive/users/hickey/cactus_yeast/yeast_chrom/N44.CHROM.fa
+S288c /hive/users/hickey/cactus_yeast/yeast_chrom/S288c.CHROM.fa
+SK1 /hive/users/hickey/cactus_yeast/yeast_chrom/SK1.CHROM.fa
+UFRJ50816 /hive/users/hickey/cactus_yeast/yeast_chrom/UFRJ50816.CHROM.fa
+UWOPS034614 /hive/users/hickey/cactus_yeast/yeast_chrom/UWOPS034614.CHROM.fa
+UWOPS919171 /hive/users/hickey/cactus_yeast/yeast_chrom/UWOPS919171.CHROM.fa
+Y12 /hive/users/hickey/cactus_yeast/yeast_chrom/Y12.CHROM.fa
+YPS128 /hive/users/hickey/cactus_yeast/yeast_chrom/YPS128.CHROM.fa
+YPS138 /hive/users/hickey/cactus_yeast/yeast_chrom/YPS138.CHROM.fa
