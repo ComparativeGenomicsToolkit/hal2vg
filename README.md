@@ -19,9 +19,16 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
 ## Installing Dependencies
 
+#### vg
+
+* [vg](https://github.com/vgteam/vg) must be downloaded and built before hal2vg
+* Edit hal2vg/include.mk and make sure that VGDIR points to the correct vg directory
+
 #### HDF5 1.10.1 with C++ API enabled
 
-* Local install from source into DIR (do not need root password)  
+* Use build from [Progressive Cactus](https://github.com/glennhickey/progressiveCactus) by downloading and building Progressive Cactus *then* running `. environment` in the progressive cactus directory before building hal2vg. 
+
+* Or Local install from source into DIR (do not need root password)  
 
      `mkdir DIR/hdf5`
      `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`
@@ -35,7 +42,7 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
      `export PATH=DIR/hdf5/bin:${PATH}`  
      `export h5prefix=-prefix=DIR/hdf5`  
 
-* From [Source](http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/):
+* Or From [Source](http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/):
 
      `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`  
 	  `tar xzf  hdf5-1.10.1.tar.gz`  
@@ -43,7 +50,7 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 	  `./configure --enable-cxx`  
 	  `make && make install`  
 
-* Using [MacPorts](http://www.macports.org/):   
+* Or Using [MacPorts](http://www.macports.org/):   
 
     sudo port install hdf5 @1.10.1 +cxx
 
