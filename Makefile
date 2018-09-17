@@ -32,7 +32,7 @@ ${hal2sgPath}/libhal2sg.a : ${halPath}/halLib.a
 
 hal2vg : hal2vg.o sg2vgproto.o ${basicLibsDependencies}
 	cd deps/hal2sg && make
-	${cpp} ${cppflags} hal2vg.o sg2vgproto.o ${basicLibs}  -o hal2vg 
+	${cpp} ${cppflags} -pthread hal2vg.o sg2vgproto.o ${basicLibs}  -o hal2vg
 
 test : hal2vg
 	cd tests && VGDIR=${PWD}/${VGDIR} prove -v small.t
