@@ -8,7 +8,9 @@ VGDIR=../vg
 VGLIBDIR=$(VGDIR)/lib
 LIBPROTOBUF=$(VGLIBDIR)/libprotobuf.a
 LIBVG=$(VGLIBDIR)/libvg.a
-VGLIBS=$(LIBVG) $(LIBPROTOBUF)
+LIBHTS=$(VGLIBDIR)/libhts.a
+LIBDEFLATE=$(VGLIBDIR)/libdeflate.a
+VGLIBS=$(LIBVG) $(LIBPROTOBUF) $(LIBHTS) $(LIBDEFLATE) -llzma -lbz2
 
 sonLibRootPath=deps/sonLib
 sonLibPath=${sonLibRootPath}/lib
