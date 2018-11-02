@@ -30,9 +30,9 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
 * Or Local install from source into DIR (do not need root password)  
 
-     `mkdir DIR/hdf5`
-     `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`
-	  `tar xzf  hdf5-1.10.1.tar.gz`  
+     `mkdir DIR/hdf5`  
+     `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`  
+     `tar xzf  hdf5-1.10.1.tar.gz`  
      `cd hdf5-1.10.1`  
      `./configure --enable-cxx --prefix DIR/hdf5`  
      `make && make install` 
@@ -45,10 +45,10 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 * Or From [Source](http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/):
 
      `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`  
-	  `tar xzf  hdf5-1.10.1.tar.gz`  
+     `tar xzf  hdf5-1.10.1.tar.gz`  
      `cd hdf5-1.10.1`  
-	  `./configure --enable-cxx`  
-	  `make && make install`  
+     `./configure --enable-cxx`  
+     `make && make install`  
 
 * Or Using [MacPorts](http://www.macports.org/):   
 
