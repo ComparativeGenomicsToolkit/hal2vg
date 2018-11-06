@@ -72,4 +72,4 @@ To run the converter:
 
 To see all the options, run with no args or use `--help`.
 
-Note: The output vg may have nodes with sequence length up to 1MB, and will need to be chopped (ex `vg mod -X 100`) before indexing with `vg index`. 
+Note: The output vg may have nodes with sequence length up to 1MB, and will need to be chopped (ex `vg mod -X 32`) before indexing with `vg index`.   
