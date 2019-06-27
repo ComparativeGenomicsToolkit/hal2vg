@@ -10,13 +10,15 @@ LIBPROTOBUF=$(VGLIBDIR)/libprotobuf.a
 LIBVG=$(VGLIBDIR)/libvg.a
 LIBHTS=$(VGLIBDIR)/libhts.a
 LIBDEFLATE=$(VGLIBDIR)/libdeflate.a
-VGLIBS=$(LIBVG) $(LIBPROTOBUF) $(LIBHTS) $(LIBDEFLATE) -llzma -lbz2
+VGLIBS=$(LIBVG) $(VGLIBDIR)/libvgio.a $(LIBPROTOBUF) $(LIBHTS) $(LIBDEFLATE) -llzma -lbz2
 
 sonLibRootPath=deps/sonLib
 sonLibPath=${sonLibRootPath}/lib
 
 halRootPath=deps/hal
 halPath=${halRootPath}/lib
+halIncPath=${halRootPath}/api/inc
+halLIIncPath=${halRootPath}/liftover/inc
 
 hal2sgPath=${rootPath}/deps/hal2sg
 sg2vgPath=${rootPath}/deps/sg2vg
@@ -25,9 +27,9 @@ sgExportPath=${hal2sgPath}/sgExport
 
 include  ${sonLibRootPath}/include.mk
 
-cflags += -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} 
-cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${VGDIR}/include -I ${VGDIR}/src -UNDEBUG
-basicLibs = ${hal2sgPath}/libhal2sg.a ${sgExportPath}/sgExport.a ${halPath}/halLiftover.a ${halPath}/halLib.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a 
+cflags += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${halLIIncPath} -I ${sgExportPath} -I ${hal2sgPath} 
+cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${halLIIncPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${VGDIR}/include -I ${VGDIR}/include/vg -I ${VGDIR}/include/vg/io -I ${VGDIR}/src -UNDEBUG
+basicLibs = ${hal2sgPath}/libhal2sg.a ${sgExportPath}/sgExport.a ${halPath}/libHalLiftover.a ${halPath}/libHal.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a 
 basicLibsDependencies = ${basicLibs}
 
 # hdf5 compilation is done through its wrappers.

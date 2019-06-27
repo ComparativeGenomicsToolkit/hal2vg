@@ -29,9 +29,8 @@ static set<const Sequence*> parseRefSequences(
   const Genome* refGenome, const string& refSequenceFilePath);
 
 
-static CLParserPtr initParser()
+static void initParser(CLParser* optionsParser)
 {
-  CLParserPtr optionsParser = hdf5CLParserInstance();
   optionsParser->addArgument("halFile", "input hal file");
   optionsParser->addOption("refGenome", 
                            "name of reference genome (HAL root if empty)", 
@@ -75,12 +74,12 @@ static CLParserPtr initParser()
 
   optionsParser->setDescription("Convert HAL alignment to vg protobuf");
 
-  return optionsParser;
 }
 
 int main(int argc, char** argv)
 {
-  CLParserPtr optionsParser = initParser();
+  CLParser optionsParser;
+  initParser(&optionsParser);
   string halPath;
   string refGenomeName;
   string rootGenomeName;
@@ -98,17 +97,17 @@ int main(int argc, char** argv)
   string refSequenceFile;
   try
   {
-    optionsParser->parseOptions(argc, argv);
-    halPath = optionsParser->getArgument<string>("halFile");
-    refGenomeName = optionsParser->getOption<string>("refGenome");
-    rootGenomeName = optionsParser->getOption<string>("rootGenome");
-    targetGenomes = optionsParser->getOption<string>("targetGenomes");
-    noAncestors = optionsParser->getFlag("noAncestors");
-    refDupes = optionsParser->getFlag("refDupes");    
-    onlySequenceNames = optionsParser->getFlag("onlySequenceNames");
-    keepCase = optionsParser->getFlag("keepCase");
-    protoChunk = optionsParser->getOption<int>("protoChunk");
-    refSequenceFile = optionsParser->getOption<string>("refSequenceFile");
+    optionsParser.parseOptions(argc, argv);
+    halPath = optionsParser.getArgument<string>("halFile");
+    refGenomeName = optionsParser.getOption<string>("refGenome");
+    rootGenomeName = optionsParser.getOption<string>("rootGenome");
+    targetGenomes = optionsParser.getOption<string>("targetGenomes");
+    noAncestors = optionsParser.getFlag("noAncestors");
+    refDupes = optionsParser.getFlag("refDupes");    
+    onlySequenceNames = optionsParser.getFlag("onlySequenceNames");
+    keepCase = optionsParser.getFlag("keepCase");
+    protoChunk = optionsParser.getOption<int>("protoChunk");
+    refSequenceFile = optionsParser.getOption<string>("refSequenceFile");
     if (rootGenomeName != "\"\"" && targetGenomes != "\"\"")
     {
       throw hal_exception("--rootGenome and --targetGenomes options are "
@@ -127,13 +126,14 @@ int main(int argc, char** argv)
   catch(exception& e)
   {
     cerr << e.what() << endl;
-    optionsParser->printUsage(cerr);
+    optionsParser.printUsage(cerr);
     exit(1);
   }
   try
-  {    
-    AlignmentConstPtr alignment = openHalAlignmentReadOnly(halPath, 
-                                                           optionsParser);
+  {
+    AlignmentConstPtr alignment(openHalAlignment(halPath, 
+                                                 &optionsParser,
+                                                 hal::READ_ACCESS));
     if (alignment->getNumGenomes() == 0)
     {
       throw hal_exception("hal alignmenet is empty");
@@ -354,11 +354,11 @@ bool isCamelHal(AlignmentConstPtr alignment)
   {
     return false;
   }
-  DNAIteratorConstPtr dnaIt = rootGenome->getDNAIterator();
-  DNAIteratorConstPtr end = rootGenome->getDNAEndIterator();
-  for (; !dnaIt->equals(end); dnaIt->toRight())
+  DnaIteratorPtr dnaIt = rootGenome->getDnaIterator();
+  size_t length = rootGenome->getSequenceLength();
+  for (size_t i = 0; i < length; ++i, dnaIt->toRight())
   {
-    if (toupper(dnaIt->getChar()) != 'N')
+    if (toupper(dnaIt->getBase()) != 'N')
     {
       return false;
     }

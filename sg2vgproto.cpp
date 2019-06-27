@@ -61,8 +61,8 @@ void SG2VGProto::writeGraph(const SideGraph* sg,
     return _graph;
   };
   
-  stream::write(*_os, 1, lambda);
-  stream::finish(*_os);
+  vg::io::write(*_os, 1, lambda);
+  vg::io::finish(*_os);
 }
 
 void SG2VGProto::writeChunkedGraph(const SideGraph* sg,
@@ -177,8 +177,8 @@ void SG2VGProto::writeChunkedGraph(const SideGraph* sg,
     return _graph;
   };
 
-  stream::write(*_os, totalChunks, lambda);
-  stream::finish(*_os);
+  vg::io::write(*_os, totalChunks, lambda);
+  vg::io::finish(*_os);
 }
 
 
