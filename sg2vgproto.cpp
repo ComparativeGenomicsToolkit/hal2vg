@@ -229,6 +229,10 @@ void SG2VGProto::addPath(const string& name, const vector<SGSegment>& path,
     // node id's are 1-based in VG!
     position->set_node_id(sgSeqID + 1);
 
+    Edit* edit = mapping->add_edit();
+    edit->set_from_length(path[i].getLength());
+    edit->set_to_length(path[i].getLength());
+
     // Offsets are along the strand of the node that is being visited.
     // We always use the whole node.
     position->set_offset(0);
