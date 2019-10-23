@@ -1,7 +1,7 @@
 # creates an image containing vg and hal2vg
 
 # build on compatible vg image
-FROM quay.io/vgteam/vg:v1.11.0-74-gdab42acd-t242-build
+FROM quay.io/vgteam/vg:v1.17.0-0-gaa0b37860-t315-build
 
 # update system and install dependencies not present in vg image
 RUN apt-get -qq update && apt-get -qq install -y libhdf5-serial-dev
