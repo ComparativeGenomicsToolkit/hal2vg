@@ -1,9 +1,30 @@
 [submodule "deps/hal"]
 	path = deps/hal
-	url = https://github.com/glennhickey/hal.git
+	url = https://github.com/ComparativeGenomicsToolkit/hal.git
 [submodule "deps/sonLib"]
 	path = deps/sonLib
-	url = https://github.com/benedictpaten/sonLib.git
+	url = https://github.com/ComparativeGenomicsToolkit/sonLib.git
 [submodule "deps/hal2sg"]
 	path = deps/hal2sg
 	url = https://github.com/glennhickey/hal2sg.git
+[submodule "deps/sdsl-lite"]
+	path = deps/sdsl-lite
+	url = https://github.com/simongog/sdsl-lite.git
+[submodule "deps/DYNAMIC"]
+	path = deps/DYNAMIC
+	url = https://github.com/vgteam/DYNAMIC.git
+[submodule "deps/hopscotch-map"]
+	path = deps/hopscotch-map
+	url = https://github.com/Tessil/hopscotch-map.git
+[submodule "deps/libhandlegraph"]
+	path = deps/libhandlegraph
+	url = https://github.com/vgteam/libhandlegraph.git
+[submodule "deps/BBHash"]
+	path = deps/BBHash
+	url = https://github.com/vgteam/BBHash.git
+[submodule "deps/sparsepp"]
+	path = deps/sparsepp
+	url = https://github.com/edawson/sparsepp.git
+[submodule "deps/libbdsg-easy"]
+	path = deps/libbdsg-easy
+	url = https://github.com/vgteam/libbdsg-easy.git

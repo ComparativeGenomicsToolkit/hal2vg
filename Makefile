@@ -7,18 +7,19 @@ sidegraphInc = ${sgExportPath}/sidegraph.h ${sgExportPath}/sgcommon.h ${sgExport
 all : hal2vg
 
 cleanFast : 
-	rm -f hal2vg hal2vg.o sg2vgproto.o
+	rm -f hal2vg hal2vg.o sg2vghandle.o
 
 clean :
 	rm -f hal2vg hal2vg.o
 	cd deps/sonLib && make clean
 	cd deps/hal && make clean
 	cd deps/hal2sg && make clean
+	cd deps/libbdsg-easy && make clean
 
-sg2vgproto.o : sg2vgproto.cpp sg2vgproto.h ${sidegraphInc} ${basicLibsDependencies}
-	${cpp} ${cppflags} -I . sg2vgproto.cpp -c
+sg2vghandle.o : sg2vghandle.cpp sg2vghandle.h ${sidegraphInc} ${basicLibsDependencies}
+	${cpp} ${cppflags} -I . sg2vghandle.cpp -c
 
-hal2vg.o : hal2vg.cpp sg2vgproto.h ${sidegraphInc} ${basicLibsDependencies}
+hal2vg.o : hal2vg.cpp sg2vghandle.h ${sidegraphInc} ${basicLibsDependencies}
 	${cpp} ${cppflags} -I . hal2vg.cpp -c
 
 ${sonLibPath}/sonLib.a :
@@ -30,9 +31,20 @@ ${halPath}/halLib.a : ${sonLibPath}/sonLib.a
 ${hal2sgPath}/libhal2sg.a : ${halPath}/halLib.a
 	cd deps/hal2sg && make
 
-hal2vg : hal2vg.o sg2vgproto.o ${basicLibsDependencies}
+${libbdsgPath}/libbdsg.a :
+	cd deps/libbdsg-easy && make
+
+${libbdsgPath}/lib/libhandlegraph.a : ${libbdsgPath}/libbdsg.a
+
+${libbdsgPath}/lib/libsdsl.a : ${libbdsgPath}/libbdsg.a
+
+${libbdsgPath}/lib/libdivsufsort.a : ${libbdsgPath}/libbdsg.a
+
+${libbdsgPath}/lib/libdivsufsort64.a : ${libbdsgPath}/libbdsg.a
+
+hal2vg : hal2vg.o sg2vghandle.o ${basicLibsDependencies}
 	cd deps/hal2sg && make
-	${cpp} ${cppflags} -pthread hal2vg.o sg2vgproto.o ${basicLibs}  -o hal2vg
+	${cpp} ${cppflags} -fopenmp -pthread hal2vg.o sg2vghandle.o ${basicLibs}  -o hal2vg
 
 test : hal2vg
-	cd tests && VGDIR=${PWD}/${VGDIR} prove -v small.t
+	cd tests && prove -v small.t

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-BASH_TAP_ROOT=${VGDIR}/deps/bash-tap
-. ${VGDIR}/deps/bash-tap/bash-tap-bootstrap
+BASH_TAP_ROOT=./bash-tap
+. ${BASH_TAP_ROOT}/bash-tap-bootstrap
 
 PATH=../bin:$PATH
 PATH=../deps/hal:$PATH
