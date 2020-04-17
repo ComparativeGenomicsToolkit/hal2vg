@@ -1,7 +1,7 @@
 # hal2vg
-Prototype code for converting [HAL](https://github.com/glennhickey/hal) to [vg](https://github.com/vgteam/vg).
+[![Build Status](https://travis-ci.org/ComparativeGenomicsToolkit/hal2vg.svg?branch=master)](https://travis-ci.org/ComparativeGenomicsToolkit/hal2vg)
 
-(c) 2016 Glenn Hickey. See [LICENSE](https://github.com/glennhickey/hal2vg/blob/master/LICENSE) for details.
+Prototype code for converting [HAL](https://github.com/glennhickey/hal) to [vg](https://github.com/vgteam/vg).
 
 See also:
 * [hal2sg](https://github.com/glennhickey/hal2sg): Convert  [HAL](https://github.com/glennhickey/hal) (output by [Cactus](https://github.com/glennhickey/progressiveCactus) and [CAMEL](https://github.com/adamnovak/sequence-graphs)) to [Side Graph SQL](https://github.com/ga4gh/schemas/wiki/Human-Genome-Variation-Reference-(HGVR)-Pilot-Project#graph-format)
@@ -19,20 +19,29 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
 ## Installing Dependencies
 
-#### vg
-
-* [vg](https://github.com/vgteam/vg) must be downloaded and built before hal2vg
-* Edit hal2vg/include.mk and make sure that VGDIR points to the correct vg directory
-
 #### HDF5 1.10.1 with C++ API enabled
 
-* Use build from [Progressive Cactus](https://github.com/glennhickey/progressiveCactus) by downloading and building Progressive Cactus *then* running `. environment` in the progressive cactus directory before building hal2vg. 
+* Using apt (Ubuntu 18.04)
 
-* Or Local install from source into DIR (do not need root password)  
+    `sudo apt install libhdf5-dev`
 
-     `mkdir DIR/hdf5`  
+* Using [MacPorts](http://www.macports.org/):   
+
+    `sudo port install hdf5 @1.10.1 +cxx`
+
+* From [Source](http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/):
+
      `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`  
-     `tar xzf  hdf5-1.10.1.tar.gz`  
+	  `tar xzf  hdf5-1.10.1.tar.gz`  
+     `cd hdf5-1.10.1`  
+	  `./configure --enable-cxx`  
+	  `make && make install`  
+
+* Local install from source into DIR (do not need root password)  
+
+     `mkdir DIR/hdf5`
+     `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`
+	  `tar xzf  hdf5-1.10.1.tar.gz`  
      `cd hdf5-1.10.1`  
      `./configure --enable-cxx --prefix DIR/hdf5`  
      `make && make install` 
@@ -41,18 +50,16 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
    
      `export PATH=DIR/hdf5/bin:${PATH}`  
      `export h5prefix=-prefix=DIR/hdf5`  
+ 
+     or set these in include.local.mk.
 
-* Or From [Source](http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/):
-
-     `wget http://www.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/hdf5-1.10.1.tar.gz`  
-     `tar xzf  hdf5-1.10.1.tar.gz`  
-     `cd hdf5-1.10.1`  
-     `./configure --enable-cxx`  
-     `make && make install`  
-
-* Or Using [MacPorts](http://www.macports.org/):   
-
-    sudo port install hdf5 @1.10.1 +cxx
+    If you are using older version of HDF5, such as installed on Centos,
+    you may need to set 
+    
+    `export CXX_ABI_DEF='-D_GLIBCXX_USE_CXX11_ABI=1'
+    
+    If you get undefined functions base on string type with errors about
+    `std::__cxx11::basic_string` vs `std::basic_string`.
 
 ## Instructions
 
@@ -60,20 +67,18 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
      git clone https://github.com/glennhickey/hal2vg.git --recursive
 
-**Setting your VG path:** 
-
-* Compile `vg` with `make static`
-* Edit `include.mk` so that `VGDIR` points to where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
-* Change `LIBPROTOBUF=$(VGLIBDIR)/libprotobuf.a` to the system library that was used to build vg.  For example: `LIBPROTOBUF=/usr/lib/x86_64-linux-gnu/libprotobuf.a` in `include.mk`.  You can find it on Ubuntu with `dpkg -L libprotobuf-dev`
-
 **Compiling:**
 
      make
 
 To run the converter:
 
-	  hal2vg input.hal > output.vg
+	  hal2vg input.hal > output.pg
 
 To see all the options, run with no args or use `--help`.
 
-Note: The output vg may have nodes with sequence length up to 1MB, and will need to be chopped (ex `vg mod -X 32`) before indexing with `vg index`.   
+Note: The output graph may have nodes with sequence length up to 1MB, and will need to be chopped (ex `vg mod -X 32`) before indexing with `vg index`.
+
+Note: The output graph is only readable by vg version 1.24.0 and greater.
+
+(c) 2016 Glenn Hickey. See [LICENSE](https://github.com/glennhickey/hal2vg/blob/master/LICENSE) for details.

@@ -1,0 +1,31 @@
+# Control file for continuous integration testing at http://travis-ci.org/
+
+language: cpp
+compiler: gcc
+
+before_install:
+  - git submodule update --init --recursive  
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew install libomp; fi
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get -qq update; fi
+  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then sudo apt-get install -y libhdf5-serial-dev python3 python3-pip libpython3-dev wget; fi
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew install hdf5 python3.6 python3-pip || echo "a brew error code when installing gcc is expected"; fi
+
+install:
+  - sudo pip3 install setuptools --upgrade
+  - wget https://github.com/vgteam/vg/releases/download/v1.24.0/vg && chmod u+x vg
+
+script:
+  - export PATH=$(pwd):$PATH
+  - export PATH=$(pwd)/deps/hal/bin:$PATH
+  - make test
+
+dist: bionic
+osx_image: xcode10.1
+  
+matrix:
+  include:
+    - os: linux
+      compiler: gcc
+    - os: osx
+      compiler: clang
+      

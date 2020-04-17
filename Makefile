@@ -31,16 +31,16 @@ ${halPath}/halLib.a : ${sonLibPath}/sonLib.a
 ${hal2sgPath}/libhal2sg.a : ${halPath}/halLib.a
 	cd deps/hal2sg && make
 
-${libbdsgPath}/libbdsg.a :
+${libbdsgPath}/lib/libbdsg.a :
 	cd deps/libbdsg-easy && make
 
-${libbdsgPath}/lib/libhandlegraph.a : ${libbdsgPath}/libbdsg.a
+${libbdsgPath}/lib/lib/libhandlegraph.a : ${libbdsgPath}/lib/libbdsg.a
 
-${libbdsgPath}/lib/libsdsl.a : ${libbdsgPath}/libbdsg.a
+${libbdsgPath}/lib/lib/libsdsl.a : ${libbdsgPath}/lib/libbdsg.a
 
-${libbdsgPath}/lib/libdivsufsort.a : ${libbdsgPath}/libbdsg.a
+${libbdsgPath}/lib/lib/libdivsufsort.a : ${libbdsgPath}/lib/libbdsg.a
 
-${libbdsgPath}/lib/libdivsufsort64.a : ${libbdsgPath}/libbdsg.a
+${libbdsgPath}/lib/lib/libdivsufsort64.a : ${libbdsgPath}/lib/libbdsg.a
 
 hal2vg : hal2vg.o sg2vghandle.o ${basicLibsDependencies}
 	cd deps/hal2sg && make
