@@ -60,7 +60,11 @@ This tool is a composition of `hal2sg` and `sg2vg`.  It converts HAL into an in-
 
      git clone https://github.com/glennhickey/hal2vg.git --recursive
 
-**Setting your VG path:** Edit `include.mk` so that `VGDIR` points to where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
+**Setting your VG path:** 
+
+* Compile `vg` with `make static`
+* Edit `include.mk` so that `VGDIR` points to where you've built [vg](https://github.com/vgteam/vg).  By default it will be `../vg`
+* Change `LIBPROTOBUF=$(VGLIBDIR)/libprotobuf.a` to the system library that was used to build vg.  For example: `LIBPROTOBUF=/usr/lib/x86_64-linux-gnu/libprotobuf.a` in `include.mk`.  You can find it on Ubuntu with `dpkg -L libprotobuf-dev`
 
 **Compiling:**
 
