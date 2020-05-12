@@ -1,9 +1,12 @@
 [submodule "deps/hal"]
 	path = deps/hal
-	url = https://github.com/glennhickey/hal.git
+	url = https://github.com/ComparativeGenomicsToolkit/hal.git
 [submodule "deps/sonLib"]
 	path = deps/sonLib
-	url = https://github.com/benedictpaten/sonLib.git
+	url = https://github.com/ComparativeGenomicsToolkit/sonLib.git
 [submodule "deps/hal2sg"]
 	path = deps/hal2sg
 	url = https://github.com/glennhickey/hal2sg.git
+[submodule "deps/libbdsg-easy"]
+	path = deps/libbdsg-easy
+	url = https://github.com/vgteam/libbdsg-easy.git

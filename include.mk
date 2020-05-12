@@ -1,17 +1,6 @@
 binPath=${rootPath}
 libPath=${rootPath}
 
-#IMPORTANT: must change this to where you built vg
-VGDIR=../vg
-# Since we're writing protobuf directly for now (to avoid making a whole-graph in memory index),
-# we only link against the bare minimum to write the proto objects. 
-VGLIBDIR=$(VGDIR)/lib
-LIBPROTOBUF=$(VGLIBDIR)/libprotobuf.a
-LIBVG=$(VGLIBDIR)/libvg.a
-LIBHTS=$(VGLIBDIR)/libhts.a
-LIBDEFLATE=$(VGLIBDIR)/libdeflate.a
-VGLIBS=$(LIBVG) $(VGLIBDIR)/libvgio.a $(LIBPROTOBUF) $(LIBHTS) $(LIBDEFLATE) -llzma -lbz2
-
 sonLibRootPath=deps/sonLib
 sonLibPath=${sonLibRootPath}/lib
 
@@ -24,12 +13,13 @@ hal2sgPath=${rootPath}/deps/hal2sg
 sg2vgPath=${rootPath}/deps/sg2vg
 rapidJsonPath=${sg2vgPath}/rapidjson
 sgExportPath=${hal2sgPath}/sgExport
+libbdsgPath=${rootPath}/deps/libbdsg-easy
 
 include  ${sonLibRootPath}/include.mk
 
 cflags += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${halLIIncPath} -I ${sgExportPath} -I ${hal2sgPath} 
-cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${halLIIncPath} -I ${sgExportPath} -I ${hal2sgPath} -I ${VGDIR}/include -I ${VGDIR}/include/vg -I ${VGDIR}/include/vg/io -I ${VGDIR}/src -UNDEBUG
-basicLibs = ${hal2sgPath}/libhal2sg.a ${sgExportPath}/sgExport.a ${halPath}/libHalLiftover.a ${halPath}/libHal.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a 
+cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${halLIIncPath} -I ${sgExportPath} -I ${hal2sgPath}  -I ${libbdsgPath}/include -UNDEBUG
+basicLibs = ${hal2sgPath}/libhal2sg.a ${sgExportPath}/sgExport.a ${halPath}/libHalLiftover.a ${halPath}/libHal.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
 basicLibsDependencies = ${basicLibs}
 
 # hdf5 compilation is done through its wrappers.

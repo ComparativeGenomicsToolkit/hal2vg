@@ -15,11 +15,15 @@
 
 #include "sgbuilder.h"
 #include "side2seq.h"
-#include "sg2vgproto.h"
-#include "vg.pb.h"
+#include "sg2vghandle.h"
+#include "bdsg/packed_graph.hpp"
+#include "bdsg/hash_graph.hpp"
+#include "bdsg/odgi.hpp"
 
 using namespace std;
 using namespace hal;
+using namespace handlegraph;
+using namespace bdsg;
 
 static bool isCamelHal(AlignmentConstPtr aligment);
 static void breadthFirstGenomeSearch(const Genome* reference,
@@ -64,15 +68,15 @@ static void initParser(CLParser* optionsParser)
   optionsParser->addOptionFlag("keepCase",
                                "don't convert all nucleotides to upper case",
                                false);
-  optionsParser->addOption("protoChunk",
-                           "maximum size (approx) of output protobuf chunks (bytes)",
-                           30000000);
   optionsParser->addOption("refSequenceFile",
                            "white-space delimited list of sequence names in the "
                            "reference genome which will *not* be collapsed by duplications."
                            "  Overrides --refDupes", "\"\"");
+  optionsParser->addOption("outputFormat",
+                           "output graph format in {pg, hg, odgi} [default=pg]",
+                           "pg");
 
-  optionsParser->setDescription("Convert HAL alignment to vg protobuf");
+  optionsParser->setDescription("Convert HAL alignment to handle graph");
 
 }
 
@@ -93,8 +97,8 @@ int main(int argc, char** argv)
   // larger graphs.  So we only use to make sure we don't overflow protobuf.
   // Todo: tune down?
   const int chop = 1000000;
-  int protoChunk;
   string refSequenceFile;
+  string outputFormat;
   try
   {
     optionsParser.parseOptions(argc, argv);
@@ -106,21 +110,20 @@ int main(int argc, char** argv)
     refDupes = optionsParser.getFlag("refDupes");    
     onlySequenceNames = optionsParser.getFlag("onlySequenceNames");
     keepCase = optionsParser.getFlag("keepCase");
-    protoChunk = optionsParser.getOption<int>("protoChunk");
+    outputFormat = optionsParser.getOption<string>("outputFormat");
     refSequenceFile = optionsParser.getOption<string>("refSequenceFile");
     if (rootGenomeName != "\"\"" && targetGenomes != "\"\"")
     {
       throw hal_exception("--rootGenome and --targetGenomes options are "
                           "mutually exclusive");
     }
-    if (protoChunk > 60000000)
-    {
-      cerr << "Warning: --protoChunk parameter set dangerously high." << endl;
-    }
     if (refSequenceFile != "\"\"" && refGenomeName == "\"\"")
     {
       throw hal_exception("--refSequenceFile must be used in conjunction "
                           " with --refGenome");
+    }
+    if (outputFormat != "pg" && outputFormat != "hg" && outputFormat != "odgi") {
+      throw hal_exception("--outputFormat must be one of {pg, hg, odgi}");
     }
   }
   catch(exception& e)
@@ -308,21 +311,26 @@ int main(int argc, char** argv)
     const vector<SGNamedPath>& outPaths = converter.getOutPaths();
 
     
-    // write to vg proto
-    cerr << "Writing VG protobuf to stdout" << endl;
-    SG2VGProto vgWriter;
-    vgWriter.init(&cout);
-    //vgWriter.writeGraph(outGraph, outBases, outPaths);
+    // convert to vg handle
+    cerr << "Converting SideGraph to HandleGraph" << endl;
     
-    // chunking parameters designed to keep well under protobuf limit
-    int nodeCount = max(1UL, protoChunk / (sizeof(vg::Node) + chop));
-    int edgeCount = max(1UL, protoChunk / sizeof(vg::Edge));
-    // very conservative here assuming avg path size of 1
-    int segmentCount = max(1UL, protoChunk /
-                           (sizeof(vg::Mapping) + sizeof(vg::Path)));
-    
-    vgWriter.writeChunkedGraph(outGraph, outBases, outPaths,
-                               nodeCount, edgeCount, segmentCount);
+    unique_ptr<MutablePathMutableHandleGraph> graph;
+    if (outputFormat == "pg") {
+      graph = unique_ptr<MutablePathMutableHandleGraph>(new PackedGraph());
+    } else if (outputFormat == "hg") {
+      graph = unique_ptr<MutablePathMutableHandleGraph>(new HashGraph());
+    } else if (outputFormat == "odgi") {
+      graph = unique_ptr<MutablePathMutableHandleGraph>(new ODGI());
+    } else {
+      assert(false);
+    }
+
+    SG2VGHandle vgConverter;    
+    vgConverter.convert(outGraph, outBases, outPaths, graph.get());
+
+    // write tot stdout
+    cerr << "Writing HandleGraph to stdout" << endl;
+    dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
 
     //cout << *sgbuild.getSideGraph() << endl;
 
