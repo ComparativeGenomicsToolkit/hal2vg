@@ -7,19 +7,14 @@ sonLibPath=${sonLibRootPath}/lib
 halRootPath=deps/hal
 halPath=${halRootPath}/lib
 halIncPath=${halRootPath}/api/inc
-halLIIncPath=${halRootPath}/liftover/inc
 
-hal2sgPath=${rootPath}/deps/hal2sg
-sg2vgPath=${rootPath}/deps/sg2vg
-rapidJsonPath=${sg2vgPath}/rapidjson
-sgExportPath=${hal2sgPath}/sgExport
 libbdsgPath=${rootPath}/deps/libbdsg-easy
 
 include  ${sonLibRootPath}/include.mk
 
-cflags += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${halLIIncPath} -I ${sgExportPath} -I ${hal2sgPath} 
-cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${halLIIncPath} -I ${sgExportPath} -I ${hal2sgPath}  -I ${libbdsgPath}/include -UNDEBUG
-basicLibs = ${hal2sgPath}/libhal2sg.a ${sgExportPath}/sgExport.a ${halPath}/libHalLiftover.a ${halPath}/libHal.a ${VGLIBS} ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
+cflags += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath}
+cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
+basicLibs = ${halPath}/libHal.a ${sonLibPath}/stPinchesAndCacti.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
 basicLibsDependencies = ${basicLibs}
 
 # hdf5 compilation is done through its wrappers.
@@ -42,5 +37,4 @@ ifdef ENABLE_UDC
 
 	basicLibs += ${KENTSRC}/src/lib/${MACHTYPE}/jkweb.a  ${SAMTABIXDIR}/libsamtabix.a -lssl -lcrypto
 endif
-
 
