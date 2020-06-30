@@ -12,8 +12,8 @@ libbdsgPath=${rootPath}/deps/libbdsg-easy
 
 include  ${sonLibRootPath}/include.mk
 
-cflags += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath}
-cppflags += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
+CFLAGS += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath}
+CXXFLAGS += -std=c++11 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
 basicLibs = ${halPath}/libHal.a ${sonLibPath}/stPinchesAndCacti.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
 basicLibsDependencies = ${basicLibs}
 

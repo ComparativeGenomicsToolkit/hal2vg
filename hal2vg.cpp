@@ -39,9 +39,6 @@ static void initParser(CLParser* optionsParser) {
                                  "default, the UCSC convention of "
                                  "Genome.Sequence is used",
                                  false);
-    optionsParser->addOptionFlag("keepCase",
-                                 "don't convert all nucleotides to upper case",
-                                 false);
     optionsParser->addOption("outputFormat",
                              "output graph format in {pg, hg, odgi} [default=pg]",
                              "pg");
@@ -75,14 +72,12 @@ int main(int argc, char** argv) {
     string halPath;
     string rootGenomeName;
     bool fullNames;
-    bool keepCase;
     string outputFormat;
     try {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
         rootGenomeName = optionsParser.getOption<string>("rootGenome");
         fullNames = !optionsParser.getFlag("onlySequenceNames");
-        keepCase = optionsParser.getFlag("keepCase");
         outputFormat = optionsParser.getOption<string>("outputFormat");
         if (outputFormat != "pg" && outputFormat != "hg" && outputFormat != "odgi") {
             throw hal_exception("--outputFormat must be one of {pg, hg, odgi}");
@@ -112,11 +107,10 @@ int main(int argc, char** argv) {
         // start up our pinch graph
         stPinchThreadSet* threadSet = stPinchThreadSet_construct();
         
-        const Genome* parentGenome = NULL;
+        const Genome* parentGenome = nullptr;
         string parentName;
 
         deque<string> queue = {rootGenomeName};
-        size_t childs_outstanding = 0;
 
         while (!queue.empty()) {
             string genomeName = queue.front();
@@ -130,7 +124,7 @@ int main(int argc, char** argv) {
                 // load up the parent genome if it's not already open, taking care
                 // to only ever have one parent open at a time
                 if (curParent != parentName) {
-                    if (parentGenome != NULL) {
+                    if (parentGenome != nullptr) {
                         alignment->closeGenome(parentGenome);
                     }
                     parentName = curParent;
@@ -138,22 +132,27 @@ int main(int argc, char** argv) {
                 }
 
                 // pinch the child with its parent
+                cerr << "pinching " << genome->getName() << endl;
                 pinch_genome(genome, threadSet, nameToID, fullNames);
             }
 
             // recurse on children                
             vector<string> childs = alignment->getChildNames(genomeName);
-            for (int i = 0; i < childs.size(); ++i) {
+            for (size_t i = 0; i < childs.size(); ++i) {
                 queue.push_back(childs[i]);
             }
 
             // todo: this logic not very efficient for normal (ie non-star trees)
             alignment->closeGenome(genome);
+
         }
 
-        if (parentGenome != NULL) {
+        if (parentGenome != nullptr) {
             alignment->closeGenome(parentGenome);
         }
+
+        // clean up the pinch graph
+        stPinchThreadSet_joinTrivialBoundaries(threadSet);
 
         // make a handle graph
         unique_ptr<MutablePathMutableHandleGraph> graph;
@@ -176,15 +175,18 @@ int main(int argc, char** argv) {
             string genomeName = queue.front();
             queue.pop_front();
             const Genome* genome = alignment->openGenome(genomeName);
-                        
+
+            cerr << "handling " << genome->getName() << endl;
             pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, fullNames);
 
             vector<string> childs = alignment->getChildNames(genomeName);
-            for (int i = 0; i < childs.size(); ++i) {
+            for (size_t i = 0; i < childs.size(); ++i) {
                 queue.push_back(childs[i]);
             }
             alignment->closeGenome(genome);
         }
+
+        stPinchThreadSet_destruct(threadSet);
 
         // write out the graph
         dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
@@ -236,6 +238,14 @@ void pinch_genome(const Genome* genome,
     stPinchThread* botThread = nullptr;
     string topString;
     string botString;
+
+    // merge up consecutive segments for fewer pinches
+    stPinchThread* prevTopThread = nullptr;
+    stPinchThread* prevBotThread = nullptr;
+    hal_index_t prevStart1 = -1;
+    hal_index_t prevStart2 = -1;
+    hal_index_t prevLength = -1;
+    bool prevReversed = false;
     
     for (; not topIt->atEnd(); topIt->toRight()) {
         if (topIt->tseg()->hasParent()) {
@@ -267,7 +277,7 @@ void pinch_genome(const Genome* genome,
 
             int64_t first_match = -1;
             int64_t last_match = -1;
-            for (int64_t i = 0; i < topString.length(); ++i) {
+            for (int64_t i = 0; i < (int64_t)topString.length(); ++i) {
                 if (std::toupper(topString[i]) == std::toupper(botString[i])) {
                     if (first_match == -1) {
                         first_match = i;
@@ -291,18 +301,55 @@ void pinch_genome(const Genome* genome,
                              << " sp1g=" << (start1 + topSeq->getStartPosition()) << " sp2g=" << (start2 + botSeq->getStartPosition()) << endl
                              << "   " << topString.substr(first_match, length) << endl;
 #endif
-                        stPinchThread_pinch(topThread,
-                                            botThread,
-                                            start1,
-                                            start2,
-                                            length,
-                                            !botIt->getReversed());
+                        // are we dealing with two consectuive segments? 
+                        bool canMerge = topThread == prevTopThread &&
+                           botThread == prevBotThread &&
+                           start1 == prevStart1 + prevLength &&
+                           botIt->getReversed() == prevReversed &&
+                           ((!prevReversed && start2 == prevStart2 + prevLength) ||
+                            (prevReversed && start2 + length == prevStart2));
+
+                        if (canMerge) {
+                            // if consecutive, just merge
+                            prevLength += length;
+                            if (botIt->getReversed()) {
+                                prevStart2 = start2;
+                            }
+                        } else {
+                            // otherwise
+                            if (prevTopThread != nullptr) {
+                                // pinch the last segment
+                                stPinchThread_pinch(prevTopThread,
+                                                    prevBotThread,
+                                                    prevStart1,
+                                                    prevStart2,
+                                                    prevLength,
+                                                    !prevReversed);
+                            }
+                            // and update our previous
+                            prevTopThread = topThread;
+                            prevBotThread = botThread;
+                            prevStart1 = start1;
+                            prevStart2 = start2;
+                            prevLength = length;
+                            prevReversed = botIt->getReversed();
+                        }
+                                                
                     }
                     first_match = -1;
                     last_match = -1;
                 }
             }            
         }
+    }
+    // do that last pinch
+    if (prevTopThread != nullptr) {
+        stPinchThread_pinch(prevTopThread,
+                            prevBotThread,
+                            prevStart1,
+                            prevStart2,
+                            prevLength,
+                            !prevReversed);
     }
 }
 
@@ -327,9 +374,7 @@ void pinch_to_handle(const Genome* genome,
         string pathString;
         
         // iterate over the segments of the sequence
-        stPinchSegment* prevSeg = NULL;
-        stPinchBlock* prevBlock = NULL;
-        bool prevRev = false;
+        stPinchSegment* prevSeg = nullptr;
         handle_t prevHandle;
         stPinchSegment* lastSeg = stPinchThread_getLast(thread);
         hal_index_t segStart = 0;
@@ -339,7 +384,7 @@ void pinch_to_handle(const Genome* genome,
 
             // get the segment's block.  note that if it's not aligned to anything, it will have no block
             stPinchBlock* block = stPinchSegment_getBlock(seg);
-            bool reversed = block != NULL && stPinchSegment_getBlockOrientation(seg) == 0;
+            bool reversed = block != nullptr && stPinchSegment_getBlockOrientation(seg) == 0;
             handle_t handle;
 
             // get the segment's dna sequence from the hal
@@ -354,7 +399,7 @@ void pinch_to_handle(const Genome* genome,
             if (bi == blockToNode.end()) {
                 // no: it is a new block
                 handle = graph.create_handle(seqString);
-                if (block != NULL) {
+                if (block != nullptr) {
                     blockToNode[block] = graph.get_id(handle);
                 }
 #ifdef debug                
@@ -383,7 +428,7 @@ void pinch_to_handle(const Genome* genome,
             }
                    
             // wire up the edge to previous
-            if (prevSeg != NULL) {
+            if (prevSeg != nullptr) {
 #ifdef debug
                 cerr << "creating edge from " << graph.get_id(prevHandle) << ":" << graph.get_is_reverse(prevHandle) << " -> "
                      << graph.get_id(handle) << ":" << graph.get_is_reverse(handle) << endl;
@@ -395,8 +440,6 @@ void pinch_to_handle(const Genome* genome,
             graph.append_step(pathHandle, handle);
             pathString += graph.get_sequence(handle);
 
-            prevRev = reversed;
-            prevBlock = block;
             prevSeg = seg;
             prevHandle = handle;
             
