@@ -169,8 +169,8 @@ int main(int argc, char** argv) {
         // keep track of where blocks fit into the handle graph
         unordered_map<stPinchBlock*, nid_t> blockToNode;
 
-        // start iterating over the genomes again in order to export to handle graph            
-        queue.push_back(parentName);
+        // start iterating over the genomes again in order to export to handle graph
+        queue = {rootGenomeName};
         while (!queue.empty()) {
             string genomeName = queue.front();
             queue.pop_front();
@@ -471,9 +471,5 @@ void pinch_to_handle(const Genome* genome,
             }
             cerr << "successuflly converted " << seqName << endl;
         }
-        catch(exception& e) {
-            cerr << e.what() << endl;
-        }
-
     }
 }

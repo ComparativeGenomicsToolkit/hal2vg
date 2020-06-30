@@ -18,7 +18,6 @@ Supports the three sequence graph formats in [libbdsg](https://github.com/vgteam
 
 ## Suggested Postprocessing:
 
-*  Remove trivial edges with `vg mod --unchop`.  This shouldn't be necessary, but output is currently more fragmented than necessary.
 *  Remove overlong nodes with `vg mod --chop 32`.  vg's mapping logic is mostly tuned and tested using a 32-base node length cap.
 *  Sort the output with `vg ids --sort`.  
 
