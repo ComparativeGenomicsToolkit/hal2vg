@@ -36,7 +36,7 @@ You can use the the [Dockerfile](Dockerfile) as a guide to see how all dependenc
 
 It is required to use the `--inMemory` option for all but trivial inputs.
 
-`vg` has been tuned to work best of graph with nodes chopped to at most 32 bases.  It is therefore recommended to use the `--chop 32` option.
+`vg` has been tuned to work best on graphs with nodes chopped to at most 32 bases.  It is therefore recommended to use the `--chop 32` option.
 
 ```
 hal2vg input.hal --inMemory --chop 32 > output.pg
