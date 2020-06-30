@@ -176,7 +176,6 @@ int main(int argc, char** argv) {
             queue.pop_front();
             const Genome* genome = alignment->openGenome(genomeName);
 
-            cerr << "handling " << genome->getName() << endl;
             pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, fullNames);
 
             vector<string> childs = alignment->getChildNames(genomeName);
@@ -404,7 +403,7 @@ void pinch_to_handle(const Genome* genome,
                 }
 #ifdef debug                
                 cerr << "created node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
-                     << " reev=" << reversed << " len=" << seqString.length()
+                     << " rev=" << reversed << " len=" << seqString.length()
                      << endl;
                 cerr << "node seq " << graph.get_sequence(handle) << endl;
 #endif
@@ -413,13 +412,11 @@ void pinch_to_handle(const Genome* genome,
                 handle = graph.get_handle(bi->second);
 #ifdef debug
                 cerr << "found node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
-                     << " reev=" << reversed << " len=" << seqString.length()
+                     << " rev=" << reversed << " len=" << seqString.length()
                      << endl;
                 cerr << "node seq " << graph.get_sequence(handle) << endl;
                 cerr << "my substring " << seqString << endl;
 #endif
-                //assert(seqString == graph.get_sequence(handle));
-                                
             }
             assert(!graph.get_is_reverse(handle));
             if (reversed) {
