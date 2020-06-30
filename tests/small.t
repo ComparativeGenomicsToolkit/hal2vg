@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=../bin:$PATH
 PATH=../deps/hal:$PATH
 
-plan tests 4
+plan tests 2
 
 maf2hal small/small.maf small.hal
 hal2vg small.hal > small.vg
@@ -18,14 +18,5 @@ is $(vg validate small.vg | wc -l) 0 "output vg validates"
 is $(jq --argfile a small.json --argfile b small/truth.json -n 'def post_recurse(f): def r: (f | select(. != null) | r), .; r; def post_recurse: post_recurse(.[]?); ($a | (post_recurse | arrays) |= sort) as $a | ($b | (post_recurse | arrays) |= sort) as $b | $a == $b') true "output graph identical to manually verified truth graph"
 
 rm -f small.vg small.json
-
-hal2vg small.hal --refGenome cat > small_cat.vg
-vg view -j small_cat.vg | jq . > small_cat.json
-
-is $(vg validate small_cat.vg | wc -l) 0 "output cat-referenced vg validates"
-
-is $(jq --argfile a small_cat.json --argfile b small/truth_cat.json -n 'def post_recurse(f): def r: (f | select(. != null) | r), .; r; def post_recurse: post_recurse(.[]?); ($a | (post_recurse | arrays) |= sort) as $a | ($b | (post_recurse | arrays) |= sort) as $b | $a == $b') true "output cat-referenced graph identical to manually verified truth graph"
-
-rm -f small_cat.vg small_cat.json
 
 rm -f small.hal 

@@ -4,9 +4,9 @@
 [submodule "deps/sonLib"]
 	path = deps/sonLib
 	url = https://github.com/ComparativeGenomicsToolkit/sonLib.git
-[submodule "deps/hal2sg"]
-	path = deps/hal2sg
-	url = https://github.com/glennhickey/hal2sg.git
 [submodule "deps/libbdsg-easy"]
 	path = deps/libbdsg-easy
 	url = https://github.com/vgteam/libbdsg-easy.git
+[submodule "deps/pinchesAndCacti"]
+	path = deps/pinchesAndCacti
+	url = https://github.com/ComparativeGenomicsToolkit/pinchesAndCacti.git
