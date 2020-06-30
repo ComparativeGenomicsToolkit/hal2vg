@@ -1,50 +1,12 @@
 {
-  "node": [
-    {
-      "sequence": "G",
-      "id": "1"
-    },
-    {
-      "sequence": "C",
-      "id": "2"
-    },
-    {
-      "sequence": "A",
-      "id": "3"
-    },
-    {
-      "sequence": "GC",
-      "id": "4"
-    },
-    {
-      "sequence": "A",
-      "id": "5"
-    },
-    {
-      "sequence": "G",
-      "id": "6"
-    },
-    {
-      "sequence": "AA",
-      "id": "7"
-    },
-    {
-      "sequence": "T",
-      "id": "8"
-    },
-    {
-      "sequence": "T",
-      "id": "9"
-    }
-  ],
   "edge": [
     {
       "from": "1",
-      "to": "2"
+      "to": "9"
     },
     {
       "from": "1",
-      "to": "9"
+      "to": "2"
     },
     {
       "from": "2",
@@ -52,9 +14,7 @@
     },
     {
       "from": "3",
-      "to": "9",
-      "from_start": true,
-      "to_end": true
+      "to": "8"
     },
     {
       "from": "3",
@@ -62,304 +22,353 @@
     },
     {
       "from": "3",
-      "to": "8",
+      "from_start": true,
+      "to": "9",
       "to_end": true
     },
     {
       "from": "4",
-      "to": "5"
+      "to": "5",
+      "to_end": true
     },
     {
       "from": "5",
+      "from_start": true,
+      "to": "7",
+      "to_end": true
+    },
+    {
+      "from": "5",
+      "from_start": true,
       "to": "6"
     },
     {
-      "from": "5",
-      "to": "7"
+      "from": "6",
+      "to": "8",
+      "to_end": true
     },
     {
       "from": "6",
-      "to": "7"
-    },
-    {
-      "from": "6",
-      "to": "8"
+      "to": "7",
+      "to_end": true
     },
     {
       "from": "7",
-      "to": "8"
+      "from_start": true,
+      "to": "8",
+      "to_end": true
+    }
+  ],
+  "node": [
+    {
+      "id": "1",
+      "sequence": "G"
+    },
+    {
+      "id": "2",
+      "sequence": "C"
+    },
+    {
+      "id": "3",
+      "sequence": "A"
+    },
+    {
+      "id": "4",
+      "sequence": "GC"
+    },
+    {
+      "id": "5",
+      "sequence": "T"
+    },
+    {
+      "id": "6",
+      "sequence": "G"
+    },
+    {
+      "id": "7",
+      "sequence": "TT"
+    },
+    {
+      "id": "8",
+      "sequence": "A"
+    },
+    {
+      "id": "9",
+      "sequence": "T"
     }
   ],
   "path": [
     {
-      "name": "cat.3",
       "mapping": [
         {
-          "position": {
-            "node_id": "1"
-          },
           "edit": [
             {
               "from_length": 1,
               "to_length": 1
             }
           ],
+          "position": {
+            "node_id": "1"
+          },
           "rank": "1"
         },
         {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
           "position": {
             "node_id": "9"
           },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
           "rank": "2"
         },
         {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
           "position": {
             "node_id": "3"
           },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
           "rank": "3"
         },
         {
-          "position": {
-            "node_id": "8",
-            "is_reverse": true
-          },
           "edit": [
             {
               "from_length": 1,
               "to_length": 1
             }
           ],
-          "rank": "4"
-        },
-        {
-          "position": {
-            "node_id": "7",
-            "is_reverse": true
-          },
-          "edit": [
-            {
-              "from_length": 2,
-              "to_length": 2
-            }
-          ],
-          "rank": "5"
-        },
-        {
-          "position": {
-            "node_id": "5",
-            "is_reverse": true
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "6"
-        }
-      ]
-    },
-    {
-      "name": "chimp.2",
-      "mapping": [
-        {
-          "position": {
-            "node_id": "1"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "1"
-        },
-        {
-          "position": {
-            "node_id": "2"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "2"
-        },
-        {
-          "position": {
-            "node_id": "3"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "3"
-        },
-        {
-          "position": {
-            "node_id": "4"
-          },
-          "edit": [
-            {
-              "from_length": 2,
-              "to_length": 2
-            }
-          ],
-          "rank": "4"
-        },
-        {
-          "position": {
-            "node_id": "5"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "5"
-        },
-        {
-          "position": {
-            "node_id": "6"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "6"
-        },
-        {
           "position": {
             "node_id": "8"
           },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "7"
-        }
-      ]
-    },
-    {
-      "name": "human.1",
-      "mapping": [
-        {
-          "position": {
-            "node_id": "1"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "1"
+          "rank": "4"
         },
         {
-          "position": {
-            "node_id": "2"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "2"
-        },
-        {
-          "position": {
-            "node_id": "3"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "3"
-        },
-        {
-          "position": {
-            "node_id": "4"
-          },
           "edit": [
             {
               "from_length": 2,
               "to_length": 2
             }
           ],
-          "rank": "4"
-        },
-        {
-          "position": {
-            "node_id": "5"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "5"
-        },
-        {
-          "position": {
-            "node_id": "6"
-          },
-          "edit": [
-            {
-              "from_length": 1,
-              "to_length": 1
-            }
-          ],
-          "rank": "6"
-        },
-        {
           "position": {
             "node_id": "7"
           },
-          "edit": [
-            {
-              "from_length": 2,
-              "to_length": 2
-            }
-          ],
-          "rank": "7"
+          "rank": "5"
         },
         {
-          "position": {
-            "node_id": "8"
-          },
           "edit": [
             {
               "from_length": 1,
               "to_length": 1
             }
           ],
+          "position": {
+            "node_id": "5"
+          },
+          "rank": "6"
+        }
+      ],
+      "name": "cat.3"
+    },
+    {
+      "mapping": [
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "1"
+          },
+          "rank": "1"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "2"
+          },
+          "rank": "2"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "3"
+          },
+          "rank": "3"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 2,
+              "to_length": 2
+            }
+          ],
+          "position": {
+            "node_id": "4"
+          },
+          "rank": "4"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "is_reverse": true,
+            "node_id": "5"
+          },
+          "rank": "5"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "6"
+          },
+          "rank": "6"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "is_reverse": true,
+            "node_id": "8"
+          },
+          "rank": "7"
+        }
+      ],
+      "name": "chimp.2"
+    },
+    {
+      "mapping": [
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "1"
+          },
+          "rank": "1"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "2"
+          },
+          "rank": "2"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "3"
+          },
+          "rank": "3"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 2,
+              "to_length": 2
+            }
+          ],
+          "position": {
+            "node_id": "4"
+          },
+          "rank": "4"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "is_reverse": true,
+            "node_id": "5"
+          },
+          "rank": "5"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "node_id": "6"
+          },
+          "rank": "6"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 2,
+              "to_length": 2
+            }
+          ],
+          "position": {
+            "is_reverse": true,
+            "node_id": "7"
+          },
+          "rank": "7"
+        },
+        {
+          "edit": [
+            {
+              "from_length": 1,
+              "to_length": 1
+            }
+          ],
+          "position": {
+            "is_reverse": true,
+            "node_id": "8"
+          },
           "rank": "8"
         }
-      ]
+      ],
+      "name": "human.1"
     }
   ]
 }
