@@ -42,7 +42,12 @@ static void initParser(CLParser* optionsParser) {
     optionsParser->addOption("outputFormat",
                              "output graph format in {pg, hg, odgi} [default=pg]",
                              "pg");
-
+    optionsParser->addOption("chop",
+                             "chop up nodes in output graph so they are not longer than given length",
+                             0);
+    optionsParser->addOptionFlag("progress",
+                                 "show progress",
+                                 false);
     optionsParser->setDescription("Convert HAL alignment to handle graph");
 
 }
@@ -66,6 +71,8 @@ static void pinch_to_handle(const Genome* genome,
                             MutablePathMutableHandleGraph& graph,
                             bool fullNames);
 
+static void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength);
+
 int main(int argc, char** argv) {
     CLParser optionsParser;
     initParser(&optionsParser);
@@ -73,6 +80,8 @@ int main(int argc, char** argv) {
     string rootGenomeName;
     bool fullNames;
     string outputFormat;
+    size_t maxNodeLength;
+    bool progress;
     try {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
@@ -82,6 +91,8 @@ int main(int argc, char** argv) {
         if (outputFormat != "pg" && outputFormat != "hg" && outputFormat != "odgi") {
             throw hal_exception("--outputFormat must be one of {pg, hg, odgi}");
         }
+        maxNodeLength = optionsParser.getOption<size_t>("chop");
+        progress = optionsParser.getFlag("progress");
     }
     catch(exception& e) {
         cerr << e.what() << endl;
@@ -132,7 +143,9 @@ int main(int argc, char** argv) {
                 }
 
                 // pinch the child with its parent
-                cerr << "pinching " << genome->getName() << endl;
+                if (progress) {
+                    cerr << "pinching " << genome->getName() << endl;
+                }
                 pinch_genome(genome, threadSet, nameToID, fullNames);
             }
 
@@ -152,6 +165,9 @@ int main(int argc, char** argv) {
         }
 
         // clean up the pinch graph
+        if (progress) {
+            cerr << "merging trivial segments and blocks in pinch graph" << endl;
+        }
         stPinchThreadSet_joinTrivialBoundaries(threadSet);
 
         // make a handle graph
@@ -176,6 +192,10 @@ int main(int argc, char** argv) {
             queue.pop_front();
             const Genome* genome = alignment->openGenome(genomeName);
 
+            if (progress) {
+                cerr << "converting " << genomeName << " with " << genome->getNumSequences()
+                     << " sequences and total length " << genome->getSequenceLength() << endl;
+            }
             pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, fullNames);
 
             vector<string> childs = alignment->getChildNames(genomeName);
@@ -185,9 +205,24 @@ int main(int argc, char** argv) {
             alignment->closeGenome(genome);
         }
 
+        // free the pinch graph
         stPinchThreadSet_destruct(threadSet);
 
+        // free the hal
+        alignment = AlignmentConstPtr();
+
+        // chop
+        if (maxNodeLength > 0) {
+            if (progress) {
+                cerr << "chopping graph to max node size " << maxNodeLength << endl;
+            }
+            chop_graph(*graph, maxNodeLength);
+        }
+
         // write out the graph
+        if (progress) {
+            cerr << "serializing graph" << endl;
+        }
         dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
     }
     catch(exception& e) {
@@ -450,26 +485,43 @@ void pinch_to_handle(const Genome* genome,
         // make sure the path we added is the same as the hal
         string halPathString;
         sequence->getString(halPathString);
-        try {
-            if (pathString.length() != halPathString.length()) {
-                throw runtime_error("Incorrect length in coverted path for " + seqName + ": " + std::to_string(pathString.length()) +
-                                    ". Should be: " + std::to_string(halPathString.length()));
-            }
-            vector<size_t> mismatches;
-            for (size_t i = 0; i < halPathString.size(); ++i) {
-                if (toupper(pathString[i]) != toupper(halPathString[i])) {
-                    mismatches.push_back(i);
-                }
-            }
-            if (!mismatches.empty()) {
-                stringstream msg;
-                msg << mismatches.size() << " mismatches found in converted path for " << seqName << ":\n";
-                for (size_t i = 0; i < mismatches.size() && i < 10; ++i) {
-                    msg << " path[" << mismatches[i] << "]=" << pathString[mismatches[i]] << ". should be " << halPathString[mismatches[i]] << "\n";
-                }
-                throw runtime_error(msg.str());
-            }
-            cerr << "successuflly converted " << seqName << endl;
+        if (pathString.length() != halPathString.length()) {
+            throw runtime_error("Incorrect length in coverted path for " + seqName + ": " + std::to_string(pathString.length()) +
+                                ". Should be: " + std::to_string(halPathString.length()));
         }
+        vector<size_t> mismatches;
+        for (size_t i = 0; i < halPathString.size(); ++i) {
+            if (toupper(pathString[i]) != toupper(halPathString[i])) {
+                mismatches.push_back(i);
+            }
+        }
+        if (!mismatches.empty()) {
+            stringstream msg;
+            msg << mismatches.size() << " mismatches found in converted path for " << seqName << ":\n";
+            for (size_t i = 0; i < mismatches.size() && i < 10; ++i) {
+                msg << " path[" << mismatches[i] << "]=" << pathString[mismatches[i]] << ". should be " << halPathString[mismatches[i]] << "\n";
+            }
+            throw runtime_error(msg.str());
+        }
+    }
+}
+
+void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength) {
+    // borrowed from https://github.com/vgteam/odgi/blob/master/src/subcommand/chop_main.cpp
+    std::vector<handle_t> to_chop;
+    graph.for_each_handle([&](const handle_t& handle) {
+            if (graph.get_length(handle) > maxNodeLength) {
+                to_chop.push_back(handle);
+            }
+        });
+
+    for (auto& handle : to_chop) {
+        // get divide points
+        uint64_t length = graph.get_length(handle);
+        std::vector<size_t> offsets;
+        for (uint64_t i = maxNodeLength; i < length; i+=maxNodeLength) {
+            offsets.push_back(i);
+        }
+        graph.divide_handle(handle, offsets);
     }
 }

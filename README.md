@@ -18,7 +18,6 @@ Supports the three sequence graph formats in [libbdsg](https://github.com/vgteam
 
 ## Suggested Postprocessing:
 
-*  Remove overlong nodes with `vg mod --chop 32`.  vg's mapping logic is mostly tuned and tested using a 32-base node length cap.
 *  Sort the output with `vg ids --sort`.  
 
 ## Installation
@@ -37,8 +36,10 @@ You can use the the [Dockerfile](Dockerfile) as a guide to see how all dependenc
 
 It is required to use the `--inMemory` option for all but trivial inputs.
 
+`vg` has been tuned to work best of graph with nodes chopped to at most 32 bases.  It is therefore recommended to use the `--chop 32` option.
+
 ```
-hal2vg input.hal --inMemory > output.pg
+hal2vg input.hal --inMemory --chop 32 > output.pg
 ```
 
 **Note**: The output graph is only readable by vg version 1.24.0 and greater.
