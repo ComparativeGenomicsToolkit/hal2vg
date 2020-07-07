@@ -241,13 +241,16 @@ int main(int argc, char** argv) {
                                  genomeName != rootGenomeName);
             
             const Genome* genome = alignment->openGenome(genomeName);
+            string curParent = alignment->getParentName(genomeName);
 
             // add the genome sequences as threads
             if (!ignoreGenome) {
+                if (progress && !(!curParent.empty() && genomeName != rootGenomeName)) {
+                    cerr << "adding threads from " << genome->getName() << endl;
+                }
                 add_genome_threads(genome, threadSet, IDToName, nameToID, fullNames);
             }
 
-            string curParent = alignment->getParentName(genomeName);
             if (!ignoreGenome && !curParent.empty() && genomeName != rootGenomeName) {
                 // load up the parent genome if it's not already open, taking care
                 // to only ever have one parent open at a time
