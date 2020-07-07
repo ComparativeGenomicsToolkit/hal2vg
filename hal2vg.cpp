@@ -34,6 +34,16 @@ static void initParser(CLParser* optionsParser) {
                              "process only genomes in clade with specified root"
                              " (HAL root if empty)", 
                              "\"\"");
+    optionsParser->addOption("targetGenomes",
+                             "comma-separated (no spaces) list of target genomes "
+                             "(others are excluded) (vist all if empty)",
+                             "\"\"");
+    optionsParser->addOptionFlag("noAncestors", 
+                                 "don't write ancestral paths, nor sequence exclusive to ancestral genomes",
+                                 false);
+    optionsParser->addOption("ignoreGenomes",
+                             "comma-separated (no spaces) list of genomes to ignore",
+                             "\"\"");
     optionsParser->addOptionFlag("onlySequenceNames",
                                  "use only sequence names for output names.  By "
                                  "default, the UCSC convention of "
@@ -78,6 +88,9 @@ int main(int argc, char** argv) {
     initParser(&optionsParser);
     string halPath;
     string rootGenomeName;
+    string targetGenomes;
+    bool noAncestors;
+    string ignoreGenomes;
     bool fullNames;
     string outputFormat;
     size_t maxNodeLength;
@@ -86,11 +99,23 @@ int main(int argc, char** argv) {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
         rootGenomeName = optionsParser.getOption<string>("rootGenome");
+        targetGenomes = optionsParser.getOption<string>("targetGenomes");
+        noAncestors = optionsParser.getFlag("noAncestors");
+        ignoreGenomes = optionsParser.getOption<string>("ignoreGenomes");
         fullNames = !optionsParser.getFlag("onlySequenceNames");
         outputFormat = optionsParser.getOption<string>("outputFormat");
         if (outputFormat != "pg" && outputFormat != "hg" && outputFormat != "odgi") {
             throw hal_exception("--outputFormat must be one of {pg, hg, odgi}");
         }
+        if (rootGenomeName != "\"\"" && targetGenomes != "\"\"") {
+            throw hal_exception("--rootGenome and --targetGenomes options are "
+                                "mutually exclusive");
+        }
+        if (ignoreGenomes != "\"\"" && targetGenomes != "\"\"") {
+            throw hal_exception("--ignoreGenomes and --targetGenomes options are "
+                                "mutually exclusive");
+        }
+        
         maxNodeLength = optionsParser.getOption<size_t>("chop");
         progress = optionsParser.getFlag("progress");
     }
@@ -104,12 +129,89 @@ int main(int argc, char** argv) {
         if (alignment->getNumGenomes() == 0) {
             throw hal_exception("input hal alignmenet is empty");
         }
+
+        vector<string> targetNames;
+        if (targetGenomes != "\"\"") {
+            targetNames = chopString(targetGenomes, ",");
+            std::sort(targetNames.begin(), targetNames.end());
+        }
+        vector<string> ignoreNames;
+        if (ignoreGenomes != "\"\"") {
+            ignoreNames = chopString(ignoreGenomes, ",");
+            std::sort(ignoreNames.begin(), ignoreNames.end());
+        }
+
+        // need to process them, but don't want their paths
+        vector<string> spanningNames;
         
-        // root is specified either by the parameter or as the alignment root
-        // by default
-        if (rootGenomeName == "\"\"") {
+        if (rootGenomeName == "\"\"" && targetNames.empty()) {
+            // no root or targets given: just use the alignment root
             rootGenomeName = alignment->getRootName();
-        } 
+        } else if (rootGenomeName == "\"\"" && !targetNames.empty()) {
+            // target names are given.  we'll infer the root as their
+            // lca, and remember all the genomes we need to transitively
+            // connect them in spanningNames
+            assert(rootGenomeName == "\"\"");            
+            set<const Genome*> targetSet;
+            for (size_t i = 0; i < targetNames.size(); ++i) {
+                const Genome* targetGenome = alignment->openGenome(targetNames[i]);
+                if (targetGenome == NULL) {
+                    throw hal_exception(string("Target genome, ") + targetNames[i] + 
+                                        ", not found in alignment");
+                }
+                targetSet.insert(targetGenome);
+            }
+            // get the root
+            const Genome* rootGenome = getLowestCommonAncestor(targetSet);
+            set<const Genome*> targetSetCpy = targetSet;
+            // make sure we have genomes connecting our set
+            getGenomesInSpanningTree(targetSetCpy, targetSet); 
+            rootGenomeName = rootGenome->getName();
+            for (set<const Genome*>::iterator i = targetSet.begin(); i != targetSet.end(); ++i) {
+                spanningNames.push_back((*i)->getName());
+                if ((*i)->getName() != rootGenomeName) {
+                    alignment->closeGenome(*i);
+                }
+            }
+            alignment->closeGenome(rootGenome);
+            std::sort(spanningNames.begin(), spanningNames.end());
+        } else if (rootGenomeName != "\"\"" && targetNames.empty()) {
+            // root name is given, use that
+            const Genome* rootGenome = alignment->openGenome(rootGenomeName);
+            if (rootGenome == NULL) {
+                throw hal_exception(string("Root genome, ") + rootGenomeName + 
+                                    ", not found in alignment");
+            }
+            alignment->closeGenome(rootGenome);
+        } else {
+            assert(false);
+            exit(1);
+        }
+
+        if (progress) {
+            cerr << "Root: " << rootGenomeName << endl;
+            if (!targetNames.empty()) {
+                cerr << "Targets:";
+                for (size_t i = 0; i < targetNames.size(); ++i) {
+                    cerr << " " << targetNames[i];
+                }
+                cerr << endl;
+            }
+            if (!spanningNames.empty()) {
+                cerr << "Spanning:";
+                for (size_t i = 0; i < spanningNames.size(); ++i) {
+                    cerr << " " << spanningNames[i];
+                }
+                cerr << endl;
+            }
+            if (!ignoreNames.empty()) {
+                cerr << "Ignore:";
+                for (size_t i = 0; i < ignoreNames.size(); ++i) {
+                    cerr << " " << ignoreNames[i];
+                }
+                cerr << endl;
+            }
+        }
 
         // map Sequence pointers to integers (assumes sequence pointers stable within hal)
         vector<string> IDToName;
@@ -126,12 +228,22 @@ int main(int argc, char** argv) {
         while (!queue.empty()) {
             string genomeName = queue.front();
             queue.pop_front();
+
+            // we have a target set, and this genome isn't in it, and this genome isn't needed to span it
+            // so we can ignore it completely
+            bool ignoreGenome = (!targetNames.empty() && !std::binary_search(targetNames.begin(), targetNames.end(), genomeName) &&
+                                 !std::binary_search(spanningNames.begin(), spanningNames.end(), genomeName) &&
+                                 genomeName != rootGenomeName);
+            
             const Genome* genome = alignment->openGenome(genomeName);
+
             // add the genome sequences as threads
-            add_genome_threads(genome, threadSet, IDToName, nameToID, fullNames);
+            if (!ignoreGenome) {
+                add_genome_threads(genome, threadSet, IDToName, nameToID, fullNames);
+            }
 
             string curParent = alignment->getParentName(genomeName);
-            if (!curParent.empty()) {
+            if (!ignoreGenome && !curParent.empty() && genomeName != rootGenomeName) {
                 // load up the parent genome if it's not already open, taking care
                 // to only ever have one parent open at a time
                 if (curParent != parentName) {
@@ -190,19 +302,30 @@ int main(int argc, char** argv) {
         while (!queue.empty()) {
             string genomeName = queue.front();
             queue.pop_front();
-            const Genome* genome = alignment->openGenome(genomeName);
 
-            if (progress) {
-                cerr << "converting " << genomeName << " with " << genome->getNumSequences()
-                     << " sequences and total length " << genome->getSequenceLength() << endl;
+            // skip it if
+            // it's an ancestor and we don't want ancestors or
+            // if we have targets and it's not in it or
+            // if it's on the ignore list
+            bool ignoreGenome = ((noAncestors && !alignment->getChildNames(genomeName).empty()) ||
+                                 (!targetNames.empty() && !std::binary_search(targetNames.begin(), targetNames.end(), genomeName)) ||
+                                 (std::binary_search(ignoreNames.begin(), ignoreNames.end(), genomeName)));
+            if (!ignoreGenome) {
+                const Genome* genome = alignment->openGenome(genomeName);
+
+                if (progress) {
+                    cerr << "converting " << genomeName << " with " << genome->getNumSequences()
+                         << " sequences and total length " << genome->getSequenceLength() << endl;
+                }
+                pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, fullNames);
+
+                alignment->closeGenome(genome);
             }
-            pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, fullNames);
-
+            
             vector<string> childs = alignment->getChildNames(genomeName);
             for (size_t i = 0; i < childs.size(); ++i) {
                 queue.push_back(childs[i]);
             }
-            alignment->closeGenome(genome);
         }
 
         // free the pinch graph
