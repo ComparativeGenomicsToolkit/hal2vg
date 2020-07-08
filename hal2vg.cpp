@@ -107,10 +107,6 @@ int main(int argc, char** argv) {
         if (outputFormat != "pg" && outputFormat != "hg" && outputFormat != "odgi") {
             throw hal_exception("--outputFormat must be one of {pg, hg, odgi}");
         }
-        if (rootGenomeName != "\"\"" && targetGenomes != "\"\"") {
-            throw hal_exception("--rootGenome and --targetGenomes options are "
-                                "mutually exclusive");
-        }
         if (ignoreGenomes != "\"\"" && targetGenomes != "\"\"") {
             throw hal_exception("--ignoreGenomes and --targetGenomes options are "
                                 "mutually exclusive");
@@ -316,7 +312,7 @@ int main(int argc, char** argv) {
             // if we have targets and it's not in it or
             // if it's on the ignore list
             bool ignoreGenome = ((noAncestors && !alignment->getChildNames(genomeName).empty()) ||
-                                 (!std::binary_search(targetNames.begin(), targetNames.end(), genomeName)) ||
+                                 (givenTargets && !std::binary_search(targetNames.begin(), targetNames.end(), genomeName)) ||
                                  (std::binary_search(ignoreNames.begin(), ignoreNames.end(), genomeName)));
             if (!ignoreGenome) {
                 const Genome* genome = alignment->openGenome(genomeName);
