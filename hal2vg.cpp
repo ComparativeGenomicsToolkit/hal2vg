@@ -71,7 +71,18 @@ static void add_genome_threads(const Genome* genome,
 static void pinch_genome(const Genome* genome,
                          stPinchThreadSet* threads,
                          unordered_map<string, int64_t>& nameToID,
-                         bool fullNames);
+                         bool fullNames,
+                         const vector<string>& targetNames);
+
+static void pinch_snp(const Genome* genome,
+                      stPinchThreadSet* threads,
+                      unordered_map<string, int64_t>& nameToID,
+                      bool fullNames,
+                      const TopSegmentIteratorPtr& topIt,
+                      int64_t topOffset,
+                      ColumnIteratorPtr& colIt,
+                      char topBase,
+                      stPinchThread* topThread);
 
 static void pinch_to_handle(const Genome* genome,
                             stPinchThreadSet* threadSet,
@@ -226,6 +237,8 @@ int main(int argc, char** argv) {
 
         deque<string> queue = {rootGenomeName};
 
+        vector<string> pinchGenomes;
+        
         while (!queue.empty()) {
             string genomeName = queue.front();
             queue.pop_front();
@@ -258,11 +271,8 @@ int main(int argc, char** argv) {
                     parentGenome = alignment->openGenome(parentName);
                 }
 
-                // pinch the child with its parent
-                if (progress) {
-                    cerr << "pinching " << genome->getName() << endl;
-                }
-                pinch_genome(genome, threadSet, nameToID, fullNames);
+                // pinching must now be done in second pass, so we queue up the genome here
+                pinchGenomes.push_back(genome->getName());
             }
 
             // recurse on children                
@@ -278,6 +288,16 @@ int main(int argc, char** argv) {
 
         if (parentGenome != nullptr) {
             alignment->closeGenome(parentGenome);
+        }
+
+        // do all the pinching
+        for (size_t i = 0; i < pinchGenomes.size(); ++i) {
+            
+            // pinch the child with its parent
+            if (progress) {
+                cerr << "pinching " << pinchGenomes[i] << endl;
+            }
+            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID, fullNames, targetNames);
         }
 
         // clean up the pinch graph
@@ -387,10 +407,32 @@ void add_genome_threads(const Genome* genome,
 void pinch_genome(const Genome* genome,
                   stPinchThreadSet* threads,
                   unordered_map<string, int64_t>& nameToID,
-                  bool fullNames) {
+                  bool fullNames,
+                  const vector<string>& targetNames) {
 
     TopSegmentIteratorPtr topIt = genome->getTopSegmentIterator();
     BottomSegmentIteratorPtr botIt = genome->getParent()->getBottomSegmentIterator();
+
+    // make a column iterator for snp pinching
+    set<const Genome*> all_genomes;
+    const Alignment* alignment = genome->getAlignment();
+    getGenomesInSubTree(alignment->openGenome(alignment->getRootName()), all_genomes);
+    // we speed things up a bit by sorting by name
+    // (though not much -- if this is too slow, which I think it may be, something more
+    // intelligent may be needed to avoid scanning too many genomes for each snp
+    // also dont include current branch in search (we've already checked) nor
+    // children (they will check for themselves)
+    set<const Genome*> targets;
+    set<const Genome*> subtree;
+    getGenomesInSubTree(genome, subtree);
+    for (set<const Genome*>::iterator gi = all_genomes.begin(); gi != all_genomes.end(); ++gi) {
+        if ((*gi)->getName() > genome->getName() && (*gi)->getName() != genome->getParent()->getName() &&
+            std::binary_search(targetNames.begin(), targetNames.end(), (*gi)->getName()) &&
+            !subtree.count(*gi)) {
+            targets.insert(*gi);
+        }
+    }
+    ColumnIteratorPtr colIt = genome->getColumnIterator(&targets);
 
     // avoid thread set lookups
     const Sequence* topSeq = nullptr;
@@ -444,6 +486,9 @@ void pinch_genome(const Genome* genome,
                         first_match = i;
                     }
                     last_match = i;
+                } else {
+                    pinch_snp(genome, threads, nameToID, fullNames, topIt, i, colIt,
+                              std::toupper(topString[i]), topThread);
                 }
                 if (std::toupper(topString[i]) != std::toupper(botString[i]) || i == topString.length() - 1) {
                     if (last_match >= first_match && first_match >= 0) {
@@ -514,6 +559,88 @@ void pinch_genome(const Genome* genome,
     }
 }
 
+// Use the column iterator to find all alignments of this snp and pinch accordingly
+//
+// Todo:  Worried this might be too slow to use at scale.  Also, it blows away all previous
+// efforts in hal2vg to be cache-friendly by only loading 2 genomes at a time, so it may
+// hog lots of memory.  On a star tree, it may just be better to manually scan the siblings
+// before resorting to the column iterator.  Or perhaps do everything in the pinch graph
+// by pinching snps then doing a pass over the graph to break them apart once its constructed.
+void pinch_snp(const Genome* genome,
+               stPinchThreadSet* threads,
+               unordered_map<string, int64_t>& nameToID,
+               bool fullNames,
+               const TopSegmentIteratorPtr& topIt,
+               int64_t topOffset,
+               ColumnIteratorPtr& colIt,
+               char topBase,
+               stPinchThread* topThread) {
+
+    const Sequence* topSeq = topIt->tseg()->getSequence();
+    hal_index_t topStart = topIt->tseg()->getStartPosition() + topOffset - topSeq->getStartPosition();
+
+    // move the column iterator into position
+    colIt->toSite(topStart + topSeq->getStartPosition(), topStart + topSeq->getStartPosition() + 1);
+
+    const ColumnIterator::ColumnMap* columnMap = colIt->getColumnMap();
+    
+    // scan through all the homologous bases
+    // todo: if we use some kind of canonical ordering, we should be able to get away with
+    // stopping at the first match, I think.  But best to start exhaustive, then use that
+    // as a baseline for testing.
+    for (ColumnIterator::ColumnMap::const_iterator cmi = columnMap->begin(); cmi != columnMap->end(); ++cmi) {
+        const Sequence* sequence = cmi->first;
+        for (ColumnIterator::DNASet::const_iterator dsi = cmi->second->begin(); dsi != cmi->second->end(); ++dsi) {
+            if (std::toupper((*dsi)->getBase()) == topBase) {
+                // found an exact match: pinch it
+                int64_t otherID = nameToID[fullNames ? sequence->getFullName() : sequence->getName()];
+                stPinchThread* otherThread = stPinchThreadSet_getThread(threads, otherID);
+                hal_index_t otherStart = (*dsi)->getArrayIndex() - sequence->getStartPosition();
+                if (sequence != topSeq || otherStart != topStart) {
+#ifdef debug
+                    string other_base;
+                    sequence->getSubString(other_base, otherStart, 1);
+                    if ((*dsi)->getReversed()) {
+                        other_base[0] = reverseComplement(other_base[0]);
+                    }
+                    char genome_top_base = genome->getDnaIterator(topStart + topSeq->getStartPosition())->getBase();
+                    char genome_oth_base = sequence->getGenome()->getDnaIterator(otherStart  + sequence->getStartPosition())->getBase();
+                    if ((*dsi)->getReversed()) {
+                        genome_oth_base = reverseComplement(genome_oth_base);
+                    }
+
+                    cerr << "pinching snp" << endl
+                         << "   base=" << topBase << endl
+                         << "   otherbase=" << other_base << endl
+                         << "   genomebase=" << genome_top_base << endl
+                         << "   genomeotherbase=" << genome_oth_base << endl
+                         << "   topStart=" << topStart << endl
+                         << "   otherStart=" << otherStart << endl
+                         << "   topSeq=" << topSeq->getFullName() << " len=" << topSeq->getSequenceLength() << endl
+                         << "   otherSeq=" << sequence->getFullName() << " len=" << sequence->getSequenceLength() << endl
+                         << "   topThread=" << stPinchThread_getName(topThread) << " len=" << stPinchThread_getLength(topThread) << endl
+                         << "   othThread=" << stPinchThread_getName(otherThread) << " len=" << stPinchThread_getLength(otherThread) << endl
+                         << "   rev=" << (*dsi)->getReversed() << endl
+                         << "   topit=" << *topIt << endl
+                         << "   offset=" << topOffset << endl;
+                    
+                    assert(std::toupper(other_base[0]) == std::toupper(topBase));
+                    assert(std::toupper(genome_oth_base) == std::toupper(genome_top_base));
+#endif
+
+                    stPinchThread_pinch(topThread,
+                                        otherThread,
+                                        topStart,
+                                        otherStart,
+                                        1,
+                                        !(*dsi)->getReversed());   
+
+                }
+            }
+        }
+    }
+}
+
 // create nodes and edges for a genome using the pinch graph
 void pinch_to_handle(const Genome* genome,
                      stPinchThreadSet* threadSet,
@@ -563,7 +690,7 @@ void pinch_to_handle(const Genome* genome,
                 if (block != nullptr) {
                     blockToNode[block] = graph.get_id(handle);
                 }
-#ifdef debug                
+#ifdef debug
                 cerr << "created node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
                      << " rev=" << reversed << " len=" << seqString.length()
                      << endl;
