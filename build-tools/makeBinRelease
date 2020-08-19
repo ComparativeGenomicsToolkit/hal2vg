@@ -1,5 +1,6 @@
 #!/bin/bash
-# Generate release tar file static-compiled binaries 
+# Generate release hal2vg binary
+# Must have a static buildable hdf5 (ie not the one from apt)
 # Must be run after tree is tagged and pushed to master.
 # Use --keep to keep working directory for debugging.
 
@@ -30,12 +31,9 @@ git submodule update --init --recursive
 if [ $(man gcc | grep nehalem | wc -l) -ge 1 ]
 then
 	 # attempt to increase portability by using older architecture
-	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make -j $(nproc) check-static
+	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make check-static
 else
-	 make -j $(nproc) check-static
+	 make check-static
 fi
 
-binPackageDir=hal2vg-bin-${REL_TAG}
-rm -rf ${binPackageDir}
-mkdir ${binPackageDir}
-cp hal2vg ${binPackageDir}
+cp hal2vg ${buildDir}/
