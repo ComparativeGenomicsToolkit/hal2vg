@@ -12,7 +12,7 @@ Supports the three sequence graph formats in [libbdsg](https://github.com/vgteam
 
 1. Each sequence in the HAL is added as a thread to a [Pinch Graph](https://github.com/ComparativeGenomicsToolkit/pinchesAndCacti).
 2. Exact pairwise alignment blocks (no gaps or substitutions) are extracted from each branch in the HAL tree and "pinched" in the graph
-3. At most two HAL genomes are ever loaded at a time
+3. For each branch, bases in the child that have substitutions in the parent (snps) are aligned across the tree using the column iterator and all exact matches are extracted and pinched.
 4. Pinch graph is cleaned up by merging trivial joins
 5. Each HAL sequence is traced through the pinch graph, adding nodes and edges to the output sequence graph.  A table is maintained to map each pinch graph block to a sequence graph node.
 
