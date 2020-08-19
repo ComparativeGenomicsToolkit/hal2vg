@@ -22,6 +22,12 @@ Supports the three sequence graph formats in [libbdsg](https://github.com/vgteam
 
 ## Installation
 
+### Binary Release
+
+You can download a standalone binary for the latest release [here](https://github.com/ComparativeGenomicsToolkit/hal2vg/releases).
+
+### Compile From Source
+
 You can use the the [Dockerfile](Dockerfile) as a guide to see how all dependencies are installed with `apt` on Ubuntu.  More details on installing HDF5 can be found in the [HAL README](https://github.com/ComparativeGenomicsToolkit/hal)
 
 **Cloning:** Don't forget to clone submodules with the `--recursive` option:
@@ -43,8 +49,6 @@ hal2vg input.hal --inMemory --chop 32 > output.pg
 ```
 
 **Note**: The output graph is only readable by vg version 1.24.0 and greater.
-
-`hal2vg` uses lots of memory to store both the entire pinch graph and sequence graph.  An alternative conversion pipeline can be found [here](https://github.com/ComparativeGenomicsToolkit/hal#pangenome-graph-export-gfa-and-vg).
 
 Copyright (C) 2020 by UCSC Computational Genomics Lab
 
