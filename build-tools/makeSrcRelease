@@ -26,7 +26,7 @@ git fetch --tags origin
 REL_TAG=$(getLatestReleaseTag)
 git checkout "${REL_TAG}"
 git submodule update --init --recursive
-find submodules -name ".git" -exec rm -Rf "{}" \;
+find deps -name ".git" -exec rm -Rf "{}" \;
 cd ..
 mv hal2vg hal2vg-${REL_TAG}
 tar -czf ${buildDir}/hal2vg-${REL_TAG}.tar.gz hal2vg-${REL_TAG}
