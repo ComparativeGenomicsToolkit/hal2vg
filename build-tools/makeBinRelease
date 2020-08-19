@@ -1,0 +1,41 @@
+#!/bin/bash
+# Generate release tar file static-compiled binaries 
+# Must be run after tree is tagged and pushed to master.
+# Use --keep to keep working directory for debugging.
+
+mydir=$(dirname $(which $0))
+source ${mydir}/releaseLib.sh
+
+keep=no
+if [ $1 = '--keep' ] ; then
+    keep=yes
+fi
+set -beEu -o pipefail
+
+buildDir=$(realpath -m build)
+binBuildDir="${buildDir}/bin-tmp"
+
+set -x
+rm -rf ${binBuildDir}
+mkdir -p ${binBuildDir}
+cd ${binBuildDir}
+git clone --recursive https://github.com/ComparativeGenomicsToolkit/hal2vg.git
+cd hal2vg
+git fetch --tags origin
+
+REL_TAG=$(getLatestReleaseTag)
+git checkout "${REL_TAG}"
+git submodule update --init --recursive
+
+if [ $(man gcc | grep nehalem | wc -l) -ge 1 ]
+then
+	 # attempt to increase portability by using older architecture
+	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make -j $(nproc) check-static
+else
+	 make -j $(nproc) check-static
+fi
+
+binPackageDir=hal2vg-bin-${REL_TAG}
+rm -rf ${binPackageDir}
+mkdir ${binPackageDir}
+cp hal2vg ${binPackageDir}
