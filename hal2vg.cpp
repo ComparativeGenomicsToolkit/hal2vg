@@ -432,7 +432,12 @@ void pinch_genome(const Genome* genome,
             targets.insert(*gi);
         }
     }
-    ColumnIteratorPtr colIt = genome->getColumnIterator(&targets);
+    ColumnIteratorPtr colIt;
+    if (!targets.empty()) {
+        // if there are no targets, then this is probably the last genome
+        // so all snps were pinched by a previous genome
+        colIt = genome->getColumnIterator(&targets);
+    }
 
     // avoid thread set lookups
     const Sequence* topSeq = nullptr;
@@ -486,7 +491,7 @@ void pinch_genome(const Genome* genome,
                         first_match = i;
                     }
                     last_match = i;
-                } else {
+                } else if (colIt.get() != NULL) {
                     pinch_snp(genome, threads, nameToID, fullNames, topIt, i, colIt,
                               std::toupper(topString[i]), topThread);
                 }
