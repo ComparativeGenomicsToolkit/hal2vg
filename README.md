@@ -45,7 +45,7 @@ It is required to use the `--inMemory` option for all but trivial inputs.
 `vg` has been tuned to work best on graphs with nodes chopped to at most 32 bases.  It is therefore recommended to use the `--chop 32` option.
 
 ```
-hal2vg input.hal --inMemory --chop 32 > output.pg
+hal2vg input.hal --inMemory --chop 32 --progress > output.pg
 ```
 
 **Note**: The output graph is only readable by vg version 1.24.0 and greater.
