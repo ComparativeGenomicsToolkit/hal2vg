@@ -72,7 +72,8 @@ static void pinch_genome(const Genome* genome,
                          stPinchThreadSet* threads,
                          unordered_map<string, int64_t>& nameToID,
                          bool fullNames,
-                         const vector<string>& targetNames);
+                         const vector<string>& targetNames,
+                         unordered_map<stPinchThread*, vector<bool>>& snp_cache);
 
 static void pinch_snp(const Genome* genome,
                       stPinchThreadSet* threads,
@@ -82,7 +83,8 @@ static void pinch_snp(const Genome* genome,
                       int64_t topOffset,
                       ColumnIteratorPtr& colIt,
                       char topBase,
-                      stPinchThread* topThread);
+                      stPinchThread* topThread,
+                      unordered_map<stPinchThread*, vector<bool>>& snp_cache);
 
 static void pinch_to_handle(const Genome* genome,
                             stPinchThreadSet* threadSet,
@@ -291,14 +293,16 @@ int main(int argc, char** argv) {
         }
 
         // do all the pinching
+        unordered_map<stPinchThread*, vector<bool>> snp_cache;
         for (size_t i = 0; i < pinchGenomes.size(); ++i) {
             
             // pinch the child with its parent
             if (progress) {
                 cerr << "pinching " << pinchGenomes[i] << endl;
             }
-            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID, fullNames, targetNames);
+            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID, fullNames, targetNames, snp_cache);
         }
+        snp_cache.clear();
 
         // clean up the pinch graph
         if (progress) {
@@ -408,36 +412,21 @@ void pinch_genome(const Genome* genome,
                   stPinchThreadSet* threads,
                   unordered_map<string, int64_t>& nameToID,
                   bool fullNames,
-                  const vector<string>& targetNames) {
+                  const vector<string>& targetNames,
+                  unordered_map<stPinchThread*, vector<bool>>& snp_cache) {
 
     TopSegmentIteratorPtr topIt = genome->getTopSegmentIterator();
     BottomSegmentIteratorPtr botIt = genome->getParent()->getBottomSegmentIterator();
 
-    // make a column iterator for snp pinching
-    set<const Genome*> all_genomes;
+    // make a target set for column iterator pinching. unfortunately this means
+    // opening every single genome
     const Alignment* alignment = genome->getAlignment();
-    getGenomesInSubTree(alignment->openGenome(alignment->getRootName()), all_genomes);
-    // we speed things up a bit by sorting by name
-    // (though not much -- if this is too slow, which I think it may be, something more
-    // intelligent may be needed to avoid scanning too many genomes for each snp
-    // also dont include current branch in search (we've already checked) nor
-    // children (they will check for themselves)
     set<const Genome*> targets;
-    set<const Genome*> subtree;
-    getGenomesInSubTree(genome, subtree);
-    for (set<const Genome*>::iterator gi = all_genomes.begin(); gi != all_genomes.end(); ++gi) {
-        if ((*gi)->getName() > genome->getName() && (*gi)->getName() != genome->getParent()->getName() &&
-            std::binary_search(targetNames.begin(), targetNames.end(), (*gi)->getName()) &&
-            !subtree.count(*gi)) {
-            targets.insert(*gi);
-        }
+    for (size_t i = 0; i < targetNames.size(); ++i) {
+        targets.insert(alignment->openGenome(targetNames[i]));
     }
-    ColumnIteratorPtr colIt;
-    if (!targets.empty()) {
-        // if there are no targets, then this is probably the last genome
-        // so all snps were pinched by a previous genome
-        colIt = genome->getColumnIterator(&targets);
-    }
+
+    ColumnIteratorPtr colIt = genome->getColumnIterator(&targets);
 
     // avoid thread set lookups
     const Sequence* topSeq = nullptr;
@@ -493,9 +482,9 @@ void pinch_genome(const Genome* genome,
                     last_match = i;
                 } else if (colIt.get() != NULL) {
                     pinch_snp(genome, threads, nameToID, fullNames, topIt, i, colIt,
-                              std::toupper(topString[i]), topThread);
+                              std::toupper(topString[i]), topThread, snp_cache);
                 }
-                if (std::toupper(topString[i]) != std::toupper(botString[i]) || i == topString.length() - 1) {
+                if (std::toupper(topString[i]) != std::toupper(botString[i]) || i == (int64_t)topString.length() - 1) {
                     if (last_match >= first_match && first_match >= 0) {
                         hal_index_t length = last_match - first_match + 1;
                         hal_index_t start1 = topIt->tseg()->getStartPosition() + first_match - topSeq->getStartPosition();
@@ -579,69 +568,59 @@ void pinch_snp(const Genome* genome,
                int64_t topOffset,
                ColumnIteratorPtr& colIt,
                char topBase,
-               stPinchThread* topThread) {
+               stPinchThread* topThread,
+               unordered_map<stPinchThread*, vector<bool>>& snp_cache) {
 
     const Sequence* topSeq = topIt->tseg()->getSequence();
     hal_index_t topStart = topIt->tseg()->getStartPosition() + topOffset - topSeq->getStartPosition();
+
+    vector<bool>& cache_rec = snp_cache[topThread];
+    if (!cache_rec.empty() && cache_rec[topStart] == true) {
+        // we've already pinched this base
+        return;
+    }
 
     // move the column iterator into position
     colIt->toSite(topStart + topSeq->getStartPosition(), topStart + topSeq->getStartPosition() + 1);
 
     const ColumnIterator::ColumnMap* columnMap = colIt->getColumnMap();
+
+    // remember all equivalence classes of pinches
+    map<char, vector<tuple<stPinchThread*, hal_index_t, bool>>> base_pinches;
     
-    // scan through all the homologous bases
-    // todo: if we use some kind of canonical ordering, we should be able to get away with
-    // stopping at the first match, I think.  But best to start exhaustive, then use that
-    // as a baseline for testing.
+    // scan through all the homologous bases, breaking them into lists for each possible nucleotide
     for (ColumnIterator::ColumnMap::const_iterator cmi = columnMap->begin(); cmi != columnMap->end(); ++cmi) {
         const Sequence* sequence = cmi->first;
         for (ColumnIterator::DNASet::const_iterator dsi = cmi->second->begin(); dsi != cmi->second->end(); ++dsi) {
-            if (std::toupper((*dsi)->getBase()) == topBase) {
-                // found an exact match: pinch it
-                int64_t otherID = nameToID[fullNames ? sequence->getFullName() : sequence->getName()];
-                stPinchThread* otherThread = stPinchThreadSet_getThread(threads, otherID);
-                hal_index_t otherStart = (*dsi)->getArrayIndex() - sequence->getStartPosition();
-                if (sequence != topSeq || otherStart != topStart) {
-#ifdef debug
-                    string other_base;
-                    sequence->getSubString(other_base, otherStart, 1);
-                    if ((*dsi)->getReversed()) {
-                        other_base[0] = reverseComplement(other_base[0]);
-                    }
-                    char genome_top_base = genome->getDnaIterator(topStart + topSeq->getStartPosition())->getBase();
-                    char genome_oth_base = sequence->getGenome()->getDnaIterator(otherStart  + sequence->getStartPosition())->getBase();
-                    if ((*dsi)->getReversed()) {
-                        genome_oth_base = reverseComplement(genome_oth_base);
-                    }
+            char botBase = std::toupper((*dsi)->getBase());
+            
+            int64_t otherID = nameToID[fullNames ? sequence->getFullName() : sequence->getName()];
+            stPinchThread* otherThread = stPinchThreadSet_getThread(threads, otherID);
+            hal_index_t otherStart = (*dsi)->getArrayIndex() - sequence->getStartPosition();
 
-                    cerr << "pinching snp" << endl
-                         << "   base=" << topBase << endl
-                         << "   otherbase=" << other_base << endl
-                         << "   genomebase=" << genome_top_base << endl
-                         << "   genomeotherbase=" << genome_oth_base << endl
-                         << "   topStart=" << topStart << endl
-                         << "   otherStart=" << otherStart << endl
-                         << "   topSeq=" << topSeq->getFullName() << " len=" << topSeq->getSequenceLength() << endl
-                         << "   otherSeq=" << sequence->getFullName() << " len=" << sequence->getSequenceLength() << endl
-                         << "   topThread=" << stPinchThread_getName(topThread) << " len=" << stPinchThread_getLength(topThread) << endl
-                         << "   othThread=" << stPinchThread_getName(otherThread) << " len=" << stPinchThread_getLength(otherThread) << endl
-                         << "   rev=" << (*dsi)->getReversed() << endl
-                         << "   topit=" << *topIt << endl
-                         << "   offset=" << topOffset << endl;
-                    
-                    assert(std::toupper(other_base[0]) == std::toupper(topBase));
-                    assert(std::toupper(genome_oth_base) == std::toupper(genome_top_base));
-#endif
+            base_pinches[botBase].push_back(make_tuple(otherThread, otherStart, !(*dsi)->getReversed()));
+            
+        }
+    }
 
-                    stPinchThread_pinch(topThread,
-                                        otherThread,
-                                        topStart,
-                                        otherStart,
-                                        1,
-                                        !(*dsi)->getReversed());   
-
-                }
+    // pinch through each nucleotde
+    for (auto& bp : base_pinches) {
+        vector<tuple<stPinchThread*, hal_index_t, bool>>& other_positions = bp.second;
+        for (size_t i = 0; i < other_positions.size(); ++i) {
+            if (i > 0) {
+                stPinchThread_pinch(get<0>(other_positions[0]),
+                                    get<0>(other_positions[i]),
+                                    get<1>(other_positions[0]),
+                                    get<1>(other_positions[i]),
+                                    1,
+                                    get<2>(other_positions[0]) == get<2>(other_positions[i]));
             }
+            // update the cache
+            vector<bool>& cache_vec = snp_cache[get<0>(other_positions[i])];
+            if (cache_vec.empty()) {
+                cache_vec.resize(stPinchThread_getLength(get<0>(other_positions[i])), false);
+            }
+            cache_vec[get<1>(other_positions[i])] = true;
         }
     }
 }
