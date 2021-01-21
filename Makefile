@@ -54,4 +54,4 @@ chop-vg-paths : chop-vg-paths.o ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -fopenmp -pthread chop-vg-paths.o  ${basicLibs}  -o chop-vg-paths
 
 test : hal2vg
-	cd tests && prove -v small.t
+	cd tests && prove -v t

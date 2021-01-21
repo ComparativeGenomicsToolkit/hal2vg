@@ -125,10 +125,10 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stre
     while (getline(bed_stream, buffer)) {
         vector<string> toks;
         split_delims(buffer, "\t\n", toks);
-        string& name = toks[0];
-        int64_t start = stol(toks[1]);
-        int64_t end = stol(toks[2]);
         if (toks.size() >= 3) {
+            string& name = toks[0];
+            int64_t start = stol(toks[1]);
+            int64_t end = stol(toks[2]);            
             intervals[name].push_back(make_pair(start, end));
         }
     }
@@ -245,32 +245,43 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
         // find breakpoints in node
         vector<size_t> cut_points;
         for (auto i = breakpoints.lower_bound(offset); i != breakpoints.end() && *i - offset < len; ++i) {
-            cut_points.push_back(*i - offset);
+            int64_t cut_point = *i - offset;
+            // libbdsg is buggy and can't accept cutpoints on ends on reverse strand
+            if (cut_point > 0 && cut_point < len) {
+                cut_points.push_back(cut_point);
+            }
         }
         // chop the node
 #ifdef debug
         if (!cut_points.empty()) {
-            cerr << "dividing node_id=" << graph->get_id(handle) << " for path " << graph->get_path_name(path_handle) << " at cut points:";
+            cerr << "dividing node_id=" << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << " seq=" << graph->get_sequence(handle)
+                 << " for path " << graph->get_path_name(path_handle) << " at cut points:";
             for (auto cp : cut_points) {
                 cerr << " " << cp;
             }
             cerr << endl;
         }
 #endif
+#ifdef debug
+        vector<handle_t> pieces = graph->divide_handle(handle, cut_points) ;
+        for (auto piece : pieces) {
+            cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece) << endl;
+        }
+#else
         graph->divide_handle(handle, cut_points);
+#endif
         offset += len;
     }
     
     steps.clear();
     int64_t original_path_length = offset;
-    auto fbi = breakpoints.upper_bound(0);
     vector<handle_t> chopped_handles;
-    if (fbi == breakpoints.end() || *fbi >= original_path_length) {
-        // nothing to chop
-        return chopped_handles;
-    }    
     offset = 0;
     step_handle_t current_step = graph->path_begin(path_handle);
+#ifdef debug
+    cerr << "init step to " << graph->get_id(graph->get_handle_of_step(current_step)) << ":" << graph->get_is_reverse(graph->get_handle_of_step(current_step))
+         << " seq=" <<graph->get_sequence(graph->get_handle_of_step(current_step)) << endl;
+#endif
     vector<path_handle_t> subpaths;
     
     // cut out a subpath and make a new path out of it
@@ -315,15 +326,17 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
             handle_t handle = graph->get_handle_of_step(current_step);
             offset += graph->get_length(handle);
             current_step = graph->get_next_step(current_step);
+#ifdef debug
+            cerr << "deleting " << graph->get_id(handle) << endl;
+#endif
             chopped_handles.push_back(handle);
         }
     }
 
     // cut the last bit
-    if (offset < original_path_length - 1) {
+    if (offset < original_path_length) {
         cut_to(original_path_length);
     }
     
-    assert (!subpaths.empty());
     return chopped_handles;    
 }
