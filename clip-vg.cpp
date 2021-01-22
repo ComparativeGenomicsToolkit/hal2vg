@@ -315,7 +315,8 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
         for (auto piece : pieces) {
             total_pieces_length += graph->get_length(piece);
 #ifdef debug
-            cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece) << endl;
+            cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece)
+                 << " tlen=" << total_pieces_length << "/" << len << endl;
 #endif
         }
         // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
