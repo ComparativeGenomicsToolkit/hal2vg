@@ -299,28 +299,27 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
             }
         }
         // chop the node
-#ifdef debug
         if (!cut_points.empty()) {
+#ifdef debug
             cerr << "dividing node_id=" << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << " seq=" << graph->get_sequence(handle)
                  << " for path " << graph->get_path_name(path_handle) << " at cut points:";
             for (auto cp : cut_points) {
                 cerr << " " << cp;
             }
             cerr << endl;
-        }
-#endif
-        
-        size_t total_pieces_length = 0;
-        vector<handle_t> pieces = graph->divide_handle(handle, cut_points) ;
-        for (auto piece : pieces) {
-            total_pieces_length += graph->get_length(piece);
+#endif        
+            size_t total_pieces_length = 0;
+            vector<handle_t> pieces = graph->divide_handle(handle, cut_points) ;
+            for (auto piece : pieces) {
+                total_pieces_length += graph->get_length(piece);
 #ifdef debug
-            cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece)
-                 << " tlen=" << total_pieces_length << "/" << len << endl;
+                cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece)
+                     << " tlen=" << total_pieces_length << "/" << len << endl;
 #endif
+            }
+            // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
+            assert(total_pieces_length == len);
         }
-        // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
-        assert(total_pieces_length == len);
         offset += len;
     }
     
