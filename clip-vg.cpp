@@ -310,8 +310,15 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
 #endif        
             size_t total_pieces_length = 0;
             vector<handle_t> pieces = graph->divide_handle(handle, cut_points) ;
-            for (auto piece : pieces) {
-                total_pieces_length += graph->get_length(piece);
+            for (size_t i = 0; i < pieces.size(); ++i) {
+                handle_t& piece = pieces[i];
+                size_t piece_length = graph->get_length(piece);
+                if (i == 0) {
+                    assert(piece_length == cut_points[0]);
+                } else if (i < pieces.size() - 1) {
+                    assert(piece_length == cut_points[i] - cut_points[i-1]);
+                }
+                total_pieces_length += piece_length;
 #ifdef debug
                 cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece)
                      << " tlen=" << total_pieces_length << "/" << len << endl;
