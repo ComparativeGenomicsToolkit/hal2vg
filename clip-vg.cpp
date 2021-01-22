@@ -204,6 +204,12 @@ vector<string> &split_delims(const string &s, const string& delims, vector<strin
 
 void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                          const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals) {
+
+    // keep some stats to print
+    size_t chopped_paths = 0;
+    size_t chopped_nodes = 0;
+    size_t chopped_bases = 0;
+    
     // careful not to iterate and chop, as we could hit new subpaths made
     vector<path_handle_t> path_handles;    
     graph->for_each_path_handle([&](path_handle_t path_handle) {
@@ -213,17 +219,28 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     for (auto path_handle : path_handles) {
         string path_name = graph->get_path_name(path_handle);
         auto it = bed_intervals.find(path_name);
+        bool was_chopped = false;
         if (it != bed_intervals.end()) {
             vector<handle_t> chopped_handles = chop_path(graph, path_handle, it->second);
             if (!chopped_handles.empty()) {
                 graph->destroy_path(path_handle);
                 for (handle_t handle : chopped_handles) {
                     assert(graph->steps_of_handle(handle).empty());
+                    chopped_bases += graph->get_length(handle);
+                    was_chopped = true;
+                    ++chopped_nodes;                    
                     dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
                 }
             }
         }
+        if (was_chopped) {
+            ++chopped_paths;
+        }
     }
+    cerr << "[clip-vg] : Clipped "
+         << chopped_bases << " bases from "
+         << chopped_nodes << " nodes in "
+         << chopped_paths << " paths" << endl;
 }
 
 vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,

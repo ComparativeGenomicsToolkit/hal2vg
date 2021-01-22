@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=../bin:$PATH
 PATH=../deps/hal:$PATH
 
-plan tests 16
+plan tests 17
 
 #vg convert -g chop/tiny-flat.gfa -p > tiny-flat.vg
 vg convert -g chop/tiny-flat.gfa -o > tiny-flat.vg
@@ -15,6 +15,14 @@ clip-vg tiny-flat.vg all.bed | vg view - | grep -v ^H > chopped-all.gfa
 is "$(cat chopped-all.gfa | wc -l)" 0 "chopping everything clears out the graph"
 
 rm -f all.bed chopped-all.gfa
+
+printf "y\t0\t100\n" > none.bed
+clip-vg tiny-flat.vg none.bed | vg view - | grep -v ^H > chopped-none.gfa
+vg view tiny-flat.vg | grep -v ^H > orig.gfa
+diff chopped-none.gfa orig.gfa
+is "$?" 0 "chopping nothing doesn't change graph"
+
+rm -f none.bed chopped-none.gfa orig.gfa
 
 printf "x\t0\t1\n" > ends.bed
 printf "x\t48\t50\n" >> ends.bed
