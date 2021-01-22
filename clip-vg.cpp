@@ -163,6 +163,11 @@ unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream) {
     graph_stream.clear();
     graph_stream.seekg(0, ios::beg);
 
+    if (magic_number != ODGI().get_magic_number()) {
+      cerr << "Only ODGI supported until this bug is fixed: https://github.com/vgteam/libbdsg/issues/94" << endl;
+      exit(1);
+    }
+    
     MutablePathMutableHandleGraph* graph;
     if (magic_number == PackedGraph().get_magic_number()) {
         graph = new PackedGraph();

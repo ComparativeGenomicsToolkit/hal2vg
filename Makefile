@@ -2,7 +2,7 @@
 rootPath = ./
 include ./include.mk
 
-all : hal2vg chop-vg-paths
+all : hal2vg clip-vg
 
 # Note: hdf5 from apt doesn't seem to work for static builds.  It should be installed
 # from source and configured with "--enable-static --disable-shared", then have its
@@ -20,10 +20,10 @@ else
 endif
 
 cleanFast : 
-	rm -f hal2vg hal2vg.o chop-vg-paths chop-vg-paths.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o
 
 clean :
-	rm -f hal2vg hal2vg.o chop-vg-paths chop-vg-paths.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o
 	cd deps/sonLib && make clean
 	cd deps/pinchesAndCacti && make clean
 	cd deps/hal && make clean
@@ -47,11 +47,11 @@ ${libbdsgPath}/lib/libbdsg.a :
 hal2vg : hal2vg.o ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -fopenmp -pthread hal2vg.o  ${basicLibs}  -o hal2vg
 
-chop-vg-paths.o : chop-vg-paths.cpp ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} -I . chop-vg-paths.cpp -c
+clip-vg.o : clip-vg.cpp ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -I . clip-vg.cpp -c
 
-chop-vg-paths : chop-vg-paths.o ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} -fopenmp -pthread chop-vg-paths.o  ${basicLibs}  -o chop-vg-paths
+clip-vg : clip-vg.o ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -fopenmp -pthread clip-vg.o  ${basicLibs}  -o clip-vg
 
 test :
 	make
