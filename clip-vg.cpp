@@ -25,6 +25,9 @@ using namespace bdsg;
 void help(char** argv) {
   cerr << "usage: " << argv[0] << " [options] <graph> <bed>" << endl
        << "Chop out path intervals from a vg graph" << endl
+       << endl
+       << "options: " << endl
+       << "    -p, --progress          Print progress" << endl
        << endl;
 }    
 
@@ -32,7 +35,8 @@ static unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& b
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
-                                const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals);
+                                const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
+                                bool progress = false);
 static vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
                                   path_handle_t path_handle,
                                   const vector<pair<int64_t, int64_t>>& intervals);
@@ -42,19 +46,21 @@ static inline string make_subpath_name(const string& path_name, size_t offset, s
 }
 
 int main(int argc, char** argv) {
-    
+
+    bool progress = false;
     int c;
     optind = 1; 
     while (true) {
 
         static const struct option long_options[] = {
             {"help", no_argument, 0, 'h'},
+            {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "h",
+        c = getopt_long (argc, argv, "hp",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -63,6 +69,9 @@ int main(int argc, char** argv) {
 
         switch (c)
         {
+        case 'p':
+            progress = true;
+            break;
         case 'h':
         case '?':
             /* getopt_long already printed an error message. */
@@ -81,13 +90,13 @@ int main(int argc, char** argv) {
 
     // Parse the positional argument
     if (optind >= argc) {
-        cerr << "[chop-vg-paths] error: too few arguments" << endl;
+        cerr << "[clip-vg] error: too few arguments" << endl;
         help(argv);
         return 1;
     }
 
     if (optind != argc - 2) {
-        cerr << "[chop-vg-paths] error: too many arguments" << endl;
+        cerr << "[clip-vg] error: too many arguments" << endl;
         help(argv);
         return 1;
     }
@@ -97,21 +106,31 @@ int main(int argc, char** argv) {
 
     ifstream bed_stream(bed_path);
     if (!bed_stream) {
-        cerr << "[chop-vg-paths] error: Unable to open input BED file " << bed_path << endl;
+        cerr << "[clip-vg] error: Unable to open input BED file " << bed_path << endl;
         return 1;
     }
     unordered_map<string, vector<pair<int64_t, int64_t>>> bed_intervals = load_bed(bed_stream);
     bed_stream.close();
+    if (progress) {
+        size_t num_intervals = 0;
+        for (auto& bi : bed_intervals) {
+            num_intervals += bi.second.size();
+        }
+        cerr << "[clip-vg]: Loaded " << num_intervals << " BED intervals over " << bed_intervals.size() << " sequences" << endl;
+    }
     
     ifstream graph_stream(graph_path);
     if (!graph_stream) {
-        cerr << "[chop-vg-paths] error: Unable to open input graph " << graph_path << endl;
+        cerr << "[clip-vg] error: Unable to open input graph " << graph_path << endl;
         return 1;
     }    
     unique_ptr<MutablePathMutableHandleGraph> graph = load_graph(graph_stream);
     graph_stream.close();
-
-    chop_path_intervals(graph.get(), bed_intervals);
+    if (progress) {
+        cerr << "[clip-vg]: Loaded graph" << endl;
+    }
+    
+    chop_path_intervals(graph.get(), bed_intervals, progress);
 
     dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
 
@@ -203,7 +222,8 @@ vector<string> &split_delims(const string &s, const string& delims, vector<strin
 }
 
 void chop_path_intervals(MutablePathMutableHandleGraph* graph,
-                         const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals) {
+                         const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
+                         bool progress) {
 
     // keep some stats to print
     size_t chopped_paths = 0;
@@ -221,6 +241,9 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
         auto it = bed_intervals.find(path_name);
         bool was_chopped = false;
         if (it != bed_intervals.end()) {
+            if (progress) {
+                cerr << "[clip-vg]: Clipping " << it->second.size() << " intervals from path " << path_name << endl;
+            }
             vector<handle_t> chopped_handles = chop_path(graph, path_handle, it->second);
             if (!chopped_handles.empty()) {
                 graph->destroy_path(path_handle);
@@ -237,10 +260,12 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             ++chopped_paths;
         }
     }
-    cerr << "[clip-vg] : Clipped "
-         << chopped_bases << " bases from "
-         << chopped_nodes << " nodes in "
-         << chopped_paths << " paths" << endl;
+    if (progress) {
+        cerr << "[clip-vg]: Clipped "
+             << chopped_bases << " bases from "
+             << chopped_nodes << " nodes in "
+             << chopped_paths << " paths" << endl;
+    }
 }
 
 vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
