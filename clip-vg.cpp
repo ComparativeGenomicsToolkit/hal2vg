@@ -37,9 +37,9 @@ static vector<string> &split_delims(const string &s, const string& delims, vecto
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                                 const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
                                 bool progress = false);
-static vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
-                                  path_handle_t path_handle,
-                                  const vector<pair<int64_t, int64_t>>& intervals);
+static unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
+                                         path_handle_t path_handle,
+                                         const vector<pair<int64_t, int64_t>>& intervals);
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
     return path_name + "[" + std::to_string(offset) + ":" + std::to_string(offset + length) + "]";
@@ -244,7 +244,7 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             if (progress) {
                 cerr << "[clip-vg]: Clipping " << it->second.size() << " intervals from path " << path_name << endl;
             }
-            vector<handle_t> chopped_handles = chop_path(graph, path_handle, it->second);
+            auto chopped_handles = chop_path(graph, path_handle, it->second);
             if (!chopped_handles.empty()) {
                 graph->destroy_path(path_handle);
                 for (handle_t handle : chopped_handles) {
@@ -268,9 +268,9 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     }
 }
 
-vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
-                           path_handle_t path_handle,
-                           const vector<pair<int64_t, int64_t>>& intervals) {
+unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
+                                  path_handle_t path_handle,
+                                  const vector<pair<int64_t, int64_t>>& intervals) {
 
     // get the breakpoints
     set<int64_t> breakpoints;
@@ -332,7 +332,7 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
     
     steps.clear();
     int64_t original_path_length = offset;
-    vector<handle_t> chopped_handles;
+    unordered_set<handle_t> chopped_handles;
     offset = 0;
     step_handle_t current_step = graph->path_begin(path_handle);
 #ifdef debug
@@ -373,6 +373,7 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
         }
     };
 
+    
     for (size_t i = 0; i < intervals.size(); ++i) {
         if (intervals[i].first > offset) {
             // cut everythign left of the interval
@@ -386,7 +387,7 @@ vector<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
 #ifdef debug
             cerr << "deleting " << graph->get_id(handle) << endl;
 #endif
-            chopped_handles.push_back(handle);
+            chopped_handles.insert(handle);
         }
     }
 
