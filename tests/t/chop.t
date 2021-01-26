@@ -27,7 +27,7 @@ rm -f none.bed chopped-none.gfa orig.gfa
 printf "x\t0\t1\n" > ends.bed
 printf "x\t48\t50\n" >> ends.bed
 clip-vg tiny-flat.vg ends.bed > chopped-ends.vg
-is "$(vg paths -Ev chopped-ends.vg)" "x[1:48]	47" "chopping ends gives subpath in the middle with correct length"
+is "$(vg paths -Ev chopped-ends.vg)" "x[1-48]	47" "chopping ends gives subpath in the middle with correct length"
 is "$(vg stats -l chopped-ends.vg | awk '{print $2}')" "47" "chopping ends leaves correct number of bases"
 
 rm -f ends.bed chopped-ends.vg
@@ -39,10 +39,10 @@ printf "x\t40\t49\n" >> bits.bed
 clip-vg tiny-flat.vg bits.bed > chopped-bits.vg
 vg paths -Ev chopped-bits.vg | sed -e 's/\t/./g' >  bits.paths
 is "$(cat bits.paths | wc -l)" "4" "correct number of paths obtained after merging consectuive intervals"
-is "$(grep 'x\[0:1\].1' bits.paths | wc -l)" "1" "first bit found"
-is "$(grep 'x\[5:10\].5' bits.paths | wc -l)" "1" "next bit found"
-is "$(grep 'x\[25:40\].15' bits.paths | wc -l)" "1" "next bit after found"
-is "$(grep 'x\[49:50\].1' bits.paths | wc -l)" "1" "last bit found"
+is "$(grep 'x\[0-1\].1' bits.paths | wc -l)" "1" "first bit found"
+is "$(grep 'x\[5-10\].5' bits.paths | wc -l)" "1" "next bit found"
+is "$(grep 'x\[25-40\].15' bits.paths | wc -l)" "1" "next bit after found"
+is "$(grep 'x\[49-50\].1' bits.paths | wc -l)" "1" "last bit found"
 
 rm -f bits.bed chopped-bits.vg bits.paths
 
@@ -61,7 +61,7 @@ rm -f all.bed chopped-all.gfa
 printf "x\t0\t1\n" > ends.bed
 printf "x\t48\t50\n" >> ends.bed
 clip-vg tiny-rev.vg ends.bed > chopped-ends.vg
-is "$(vg paths -Ev chopped-ends.vg)" "x[1:48]	47" "chopping ends gives subpath in the middle with correct length"
+is "$(vg paths -Ev chopped-ends.vg)" "x[1-48]	47" "chopping ends gives subpath in the middle with correct length"
 is "$(vg stats -l chopped-ends.vg | awk '{print $2}')" "47" "chopping ends leaves correct number of bases"
 
 rm -f ends.bed chopped-ends.vg
@@ -73,10 +73,10 @@ printf "x\t40\t49\n" >> bits.bed
 clip-vg tiny-rev.vg bits.bed > chopped-bits.vg
 vg paths -Ev chopped-bits.vg | sed -e 's/\t/./g' >  bits.paths
 is "$(cat bits.paths | wc -l)" "4" "correct number of paths obtained after merging consectuive intervals"
-is "$(grep 'x\[0:1\].1' bits.paths | wc -l)" "1" "first bit found"
-is "$(grep 'x\[5:10\].5' bits.paths | wc -l)" "1" "next bit found"
-is "$(grep 'x\[25:40\].15' bits.paths | wc -l)" "1" "next bit after found"
-is "$(grep 'x\[49:50\].1' bits.paths | wc -l)" "1" "last bit found"
+is "$(grep 'x\[0-1\].1' bits.paths | wc -l)" "1" "first bit found"
+is "$(grep 'x\[5-10\].5' bits.paths | wc -l)" "1" "next bit found"
+is "$(grep 'x\[25-40\].15' bits.paths | wc -l)" "1" "next bit after found"
+is "$(grep 'x\[49-50\].1' bits.paths | wc -l)" "1" "last bit found"
 
 rm -f bits.bed chopped-bits.vg bits.paths
 
