@@ -42,7 +42,7 @@ static unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
                                          const vector<pair<int64_t, int64_t>>& intervals);
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
-    return path_name + "[" + std::to_string(offset) + ":" + std::to_string(offset + length) + "]";
+    return path_name + "[" + std::to_string(offset) + "-" + std::to_string(offset + length) + "]";
 }
 
 int main(int argc, char** argv) {
