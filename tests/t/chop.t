@@ -50,8 +50,8 @@ rm -f tiny-flat.vg
 
 ########## flip path and repeat ##########
 
-#vg convert -g chop/tiny-rev.gfa -p > tiny-rev.vg
-vg convert -g chop/tiny-rev.gfa -o > tiny-rev.vg
+vg convert -g chop/tiny-rev.gfa -p > tiny-rev.vg
+#vg convert -g chop/tiny-rev.gfa -o > tiny-rev.vg
 printf "x\t0\t100\n" > all.bed
 clip-vg tiny-rev.vg all.bed | vg view - | grep -v ^H > chopped-all.gfa
 is "$(cat chopped-all.gfa | wc -l)" 0 "chopping everything clears out the graph"
