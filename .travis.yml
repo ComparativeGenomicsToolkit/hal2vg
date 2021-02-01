@@ -12,7 +12,7 @@ before_install:
 
 install:
   - sudo pip3 install setuptools --upgrade
-  - wget https://github.com/vgteam/vg/releases/download/v1.24.0/vg && chmod u+x vg
+  - wget https://github.com/vgteam/vg/releases/download/v1.30.0/vg && chmod u+x vg
 
 script:
   - export PATH=$(pwd):$PATH

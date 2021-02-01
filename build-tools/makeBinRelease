@@ -36,4 +36,5 @@ else
 	 make check-static
 fi
 
-cp hal2vg ${buildDir}/
+cp hal2vg clip-vg ${buildDir}/
+

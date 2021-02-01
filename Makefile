@@ -2,7 +2,7 @@
 rootPath = ./
 include ./include.mk
 
-all : hal2vg
+all : hal2vg clip-vg
 
 # Note: hdf5 from apt doesn't seem to work for static builds.  It should be installed
 # from source and configured with "--enable-static --disable-shared", then have its
@@ -18,12 +18,17 @@ ifeq ($(shell ldd hal2vg | grep "not a dynamic" | wc -l), $(shell ls hal2vg | wc
 else
 	$(error ldd found dnymaic linked dependency in hal2vg)
 endif
+ifeq ($(shell ldd clip-vg | grep "not a dynamic" | wc -l), $(shell ls clip-vg | wc -l))
+	$(info ldd verified that clip-vg static)
+else
+	$(error ldd found dnymaic linked dependency in clip-vg)
+endif
 
 cleanFast : 
-	rm -f hal2vg hal2vg.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o
 
 clean :
-	rm -f hal2vg hal2vg.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o
 	cd deps/sonLib && make clean
 	cd deps/pinchesAndCacti && make clean
 	cd deps/hal && make clean
@@ -47,5 +52,12 @@ ${libbdsgPath}/lib/libbdsg.a :
 hal2vg : hal2vg.o ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -fopenmp -pthread hal2vg.o  ${basicLibs}  -o hal2vg
 
-test : hal2vg
-	cd tests && prove -v small.t
+clip-vg.o : clip-vg.cpp ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -I . clip-vg.cpp -c
+
+clip-vg : clip-vg.o ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -fopenmp -pthread clip-vg.o  ${basicLibs}  -o clip-vg
+
+test :
+	make
+	cd tests && prove -v t
