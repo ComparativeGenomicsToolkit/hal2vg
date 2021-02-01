@@ -18,6 +18,11 @@ ifeq ($(shell ldd hal2vg | grep "not a dynamic" | wc -l), $(shell ls hal2vg | wc
 else
 	$(error ldd found dnymaic linked dependency in hal2vg)
 endif
+ifeq ($(shell ldd clip-vg | grep "not a dynamic" | wc -l), $(shell ls clip-vg | wc -l))
+	$(info ldd verified that clip-vg static)
+else
+	$(error ldd found dnymaic linked dependency in clip-vg)
+endif
 
 cleanFast : 
 	rm -f hal2vg hal2vg.o clip-vg clip-vg.o
