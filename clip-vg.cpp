@@ -334,8 +334,11 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     if (progress) {
         cerr << "[clip-vg]: Clipped "
              << chopped_bases << " bases from "
-             << chopped_nodes << " nodes in "
-             << chopped_paths << " paths" << endl;
+             << chopped_nodes << " nodes";
+        if (!force_clip) {
+            cerr << " in " << chopped_paths << " paths";
+        }
+        cerr << endl;
     }
 }
 
