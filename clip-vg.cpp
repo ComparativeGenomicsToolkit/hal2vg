@@ -23,10 +23,13 @@ using namespace handlegraph;
 using namespace bdsg;
 
 void help(char** argv) {
-  cerr << "usage: " << argv[0] << " [options] <graph> <bed>" << endl
+  cerr << "usage: " << argv[0] << " [options] <graph>" << endl
        << "Chop out path intervals from a vg graph" << endl
        << endl
        << "options: " << endl
+       << "    -b, --bed FILE          Intervals to clip in BED format" << endl
+       << "    -m, --min-length N      Only clip paths of length < N" << endl
+       << "    -f, --force-clip        Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -p, --progress          Print progress" << endl
        << endl;
 }    
@@ -36,6 +39,7 @@ static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_strea
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                                 const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
+                                bool force_clip = false,
                                 bool progress = false);
 static unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
                                          path_handle_t path_handle,
@@ -47,6 +51,9 @@ static inline string make_subpath_name(const string& path_name, size_t offset, s
 
 int main(int argc, char** argv) {
 
+    string bed_path;
+    int64_t min_length = 0;
+    bool force_clip = false;
     bool progress = false;
     int c;
     optind = 1; 
@@ -54,13 +61,16 @@ int main(int argc, char** argv) {
 
         static const struct option long_options[] = {
             {"help", no_argument, 0, 'h'},
+            {"bed", required_argument, 0, 'b'},
+            {"min-length", required_argument, 0, 'm'},
+            {"force-clip", no_argument, 0, 'f'},
             {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hp",
+        c = getopt_long (argc, argv, "hpb:m:f",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -69,6 +79,15 @@ int main(int argc, char** argv) {
 
         switch (c)
         {
+        case 'b':
+            bed_path = optarg;
+            break;
+        case 'm':
+            min_length = stol(optarg);
+            break;
+        case 'f':
+            force_clip = true;
+            break;
         case 'p':
             progress = true;
             break;
@@ -95,30 +114,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (optind != argc - 2) {
+    if (optind != argc - 1) {
         cerr << "[clip-vg] error: too many arguments" << endl;
         help(argv);
         return 1;
     }
 
-    string graph_path = argv[optind++];
-    string bed_path = argv[optind++];
-
-    ifstream bed_stream(bed_path);
-    if (!bed_stream) {
-        cerr << "[clip-vg] error: Unable to open input BED file " << bed_path << endl;
+    if (bed_path.empty() == (min_length == 0)) {
+        cerr << "[clip-vg] error: Exactly one of either -b or -m must be specified to select input" << endl;
         return 1;
     }
-    unordered_map<string, vector<pair<int64_t, int64_t>>> bed_intervals = load_bed(bed_stream);
-    bed_stream.close();
-    if (progress) {
-        size_t num_intervals = 0;
-        for (auto& bi : bed_intervals) {
-            num_intervals += bi.second.size();
-        }
-        cerr << "[clip-vg]: Loaded " << num_intervals << " BED intervals over " << bed_intervals.size() << " sequences" << endl;
-    }
-    
+
+    string graph_path = argv[optind++];
     ifstream graph_stream(graph_path);
     if (!graph_stream) {
         cerr << "[clip-vg] error: Unable to open input graph " << graph_path << endl;
@@ -129,8 +136,39 @@ int main(int argc, char** argv) {
     if (progress) {
         cerr << "[clip-vg]: Loaded graph" << endl;
     }
+
+    unordered_map<string, vector<pair<int64_t, int64_t>>> bed_intervals;
+
+    if (!bed_path.empty()) {
+        ifstream bed_stream(bed_path);
+        if (!bed_stream) {
+            cerr << "[clip-vg] error: Unable to open input BED file " << bed_path << endl;
+            return 1;
+        }
+        bed_intervals = load_bed(bed_stream);
+    } else {
+        // apply min length to all paths to get intervals
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
+                int64_t path_length = 0;
+                graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                        path_length += graph->get_length(graph->get_handle_of_step(step_handle));
+                        return path_length < min_length;
+                    });
+                if (path_length < min_length) {
+                    bed_intervals[graph->get_path_name(path_handle)].push_back(make_pair(0, path_length));
+                }
+            });
+    }
     
-    chop_path_intervals(graph.get(), bed_intervals, progress);
+    if (progress) {
+        size_t num_intervals = 0;
+        for (auto& bi : bed_intervals) {
+            num_intervals += bi.second.size();
+        }
+        cerr << "[clip-vg]: Loaded " << num_intervals << " BED intervals over " << bed_intervals.size() << " sequences" << endl;
+    }
+        
+    chop_path_intervals(graph.get(), bed_intervals, force_clip, progress);
 
     dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
 
@@ -218,6 +256,7 @@ vector<string> &split_delims(const string &s, const string& delims, vector<strin
 
 void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                          const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
+                         bool force_clip,
                          bool progress) {
 
     // keep some stats to print
@@ -230,6 +269,10 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             path_handles.push_back(path_handle);
         });
+
+    // when force_clip is true, store handles here to given them second chance at destruction
+    // after all paths are deleted
+    unordered_set<nid_t> to_destroy;
     
     for (auto path_handle : path_handles) {
         string path_name = graph->get_path_name(path_handle);
@@ -241,13 +284,32 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             }
             auto chopped_handles = chop_path(graph, path_handle, it->second);
             if (!chopped_handles.empty()) {
+#ifdef debug
+                cerr << "destroying path " << graph->get_path_name(path_handle) << endl;
+#endif
                 graph->destroy_path(path_handle);
                 for (handle_t handle : chopped_handles) {
-                    assert(graph->steps_of_handle(handle).empty());
-                    chopped_bases += graph->get_length(handle);
-                    was_chopped = true;
-                    ++chopped_nodes;                    
-                    dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+                    if (force_clip) {
+                        to_destroy.insert(graph->get_id(handle));
+                    } else {
+                        if (graph->steps_of_handle(handle).empty()) {
+                            chopped_bases += graph->get_length(handle);
+                            was_chopped = true;
+                            ++chopped_nodes;
+                            dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+#ifdef debug
+                            //cerr << "destroying handle " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << endl;
+#endif
+                        } else {
+                            cerr << "[clip-vg]: Unable to clip node " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle)
+                                 << " in path " << path_name << " because it is found in the following other paths:\n";
+                            for (step_handle_t step : graph->steps_of_handle(handle)) {
+                                cerr <<"\t" << graph->get_path_name(graph->get_path_handle_of_step(step)) << endl;
+                            }
+                            cerr << " Use the -f option to not abort in this case" << endl;
+                            exit(1);
+                        }
+                    }
                 }
             }
         }
@@ -255,6 +317,20 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             ++chopped_paths;
         }
     }
+
+    for (nid_t nid : to_destroy) {
+        assert(graph->has_node(nid));
+        handle_t handle = graph->get_handle(nid);
+        if (graph->steps_of_handle(handle).empty()) {
+            chopped_bases += graph->get_length(handle);
+            ++chopped_nodes;
+            dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+#ifdef debug
+            cerr << "force destroying handle " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << endl;
+#endif
+        }
+    }
+    
     if (progress) {
         cerr << "[clip-vg]: Clipped "
              << chopped_bases << " bases from "
@@ -320,7 +396,7 @@ unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
 #endif
             }
             // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
-            assert(total_pieces_length == len);
+            assert(total_pieces_length == (size_t)len);
         }
         offset += len;
     }
@@ -347,9 +423,6 @@ unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
         while (offset < end_offset && current_step != graph->path_end(path_handle)) {
             handle_t handle = graph->get_handle_of_step(current_step);
             steps.push_back(handle);
-#ifdef debug
-            cerr << " pushing subpath step " << graph->get_id(handle) << " len=" << graph->get_length(handle) << endl;
-#endif
             offset += graph->get_length(handle);
             current_step = graph->get_next_step(current_step);
             path_length += graph->get_length(handle);
@@ -362,6 +435,10 @@ unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
         if (path_length > 0) {
             path_handle_t subpath_handle = graph->create_path_handle(make_subpath_name(graph->get_path_name(path_handle), start_offset, path_length));
             for (auto step : steps) {
+#ifdef debug
+                cerr << " pushing subpath step " << graph->get_id(step) << ":" << graph->get_is_reverse(step)
+                     << " len=" << graph->get_length(step) <<  " to " << graph->get_path_name(subpath_handle) << endl;
+#endif
                 graph->append_step(subpath_handle, step);
             }
             subpaths.push_back(subpath_handle);
@@ -380,7 +457,7 @@ unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
             offset += graph->get_length(handle);
             current_step = graph->get_next_step(current_step);
 #ifdef debug
-            cerr << "deleting " << graph->get_id(handle) << endl;
+            cerr << "adding to delete set: " << graph->get_id(handle) << endl;
 #endif
             chopped_handles.insert(handle);
         }
