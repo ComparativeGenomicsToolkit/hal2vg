@@ -289,16 +289,18 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
 #endif
                 graph->destroy_path(path_handle);
                 for (handle_t handle : chopped_handles) {
-                    if (graph->steps_of_handle(handle).empty()) {
-                        chopped_bases += graph->get_length(handle);
-                        was_chopped = true;
-                        ++chopped_nodes;
-                        dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
-#ifdef debug
-                        cerr << "destroying handle " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << endl;
-#endif
+                    if (force_clip) {
+                        to_destroy.insert(graph->get_id(handle));
                     } else {
-                        if (!force_clip) {
+                        if (graph->steps_of_handle(handle).empty()) {
+                            chopped_bases += graph->get_length(handle);
+                            was_chopped = true;
+                            ++chopped_nodes;
+                            dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+#ifdef debug
+                            //cerr << "destroying handle " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << endl;
+#endif
+                        } else {
                             cerr << "[clip-vg]: Unable to clip node " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle)
                                  << " in path " << path_name << " because it is found in the following other paths:\n";
                             for (step_handle_t step : graph->steps_of_handle(handle)) {
@@ -306,8 +308,6 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                             }
                             cerr << " Use the -f option to not abort in this case" << endl;
                             exit(1);
-                        } else {
-                            to_destroy.insert(graph->get_id(handle));
                         }
                     }
                 }
@@ -319,16 +319,15 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     }
 
     for (nid_t nid : to_destroy) {
-        if (graph->has_node(nid)) {
-            handle_t handle = graph->get_handle(nid);
-            if (graph->steps_of_handle(handle).empty()) {
-                chopped_bases += graph->get_length(handle);
-                ++chopped_nodes;
-                dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+        assert(graph->has_node(nid));
+        handle_t handle = graph->get_handle(nid);
+        if (graph->steps_of_handle(handle).empty()) {
+            chopped_bases += graph->get_length(handle);
+            ++chopped_nodes;
+            dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
 #ifdef debug
-                cerr << "force destroying handle " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << endl;
+            cerr << "force destroying handle " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << endl;
 #endif
-            }
         }
     }
     
