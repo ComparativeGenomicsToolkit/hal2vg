@@ -27,10 +27,11 @@ void help(char** argv) {
        << "Chop out path intervals from a vg graph" << endl
        << endl
        << "options: " << endl
-       << "    -b, --bed FILE          Intervals to clip in BED format" << endl
-       << "    -m, --min-length N      Only clip paths of length < N" << endl
-       << "    -f, --force-clip        Don't abort with error if clipped node overlapped by multiple paths" << endl
-       << "    -p, --progress          Print progress" << endl
+       << "    -b, --bed FILE            Intervals to clip in BED format" << endl
+       << "    -m, --min-length N        Only clip paths of length < N" << endl
+       << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
+       << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
+       << "    -p, --progress            Print progress" << endl
        << endl;
 }    
 
@@ -44,10 +45,13 @@ static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
 static unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
                                          path_handle_t path_handle,
                                          const vector<pair<int64_t, int64_t>>& intervals);
+static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
+                                         bool progress);
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
     return path_name + "[" + std::to_string(offset) + "-" + std::to_string(offset + length) + "]";
 }
+
 
 int main(int argc, char** argv) {
 
@@ -55,6 +59,7 @@ int main(int argc, char** argv) {
     int64_t min_length = 0;
     bool force_clip = false;
     bool progress = false;
+    vector<string> replace_list;
     int c;
     optind = 1; 
     while (true) {
@@ -64,13 +69,14 @@ int main(int argc, char** argv) {
             {"bed", required_argument, 0, 'b'},
             {"min-length", required_argument, 0, 'm'},
             {"force-clip", no_argument, 0, 'f'},
+            {"name-replace", required_argument, 0, 'r'},
             {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:f",
+        c = getopt_long (argc, argv, "hpb:m:fr:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -87,6 +93,9 @@ int main(int argc, char** argv) {
             break;
         case 'f':
             force_clip = true;
+            break;
+        case 'r':
+            replace_list.push_back(optarg);
             break;
         case 'p':
             progress = true;
@@ -120,8 +129,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (bed_path.empty() == (min_length == 0)) {
-        cerr << "[clip-vg] error: Exactly one of either -b or -m must be specified to select input" << endl;
+    if (!bed_path.empty() && min_length != 0) {
+        cerr << "[clip-vg] error: -b and -m must cannot be used together" << endl;
+        return 1;
+    }
+
+    if (bed_path.empty() && min_length == 0 && replace_list.empty()) {
+        cerr <<  "[clip-vg] error: at east one of -b, -m or -r must be specified" << endl;
         return 1;
     }
 
@@ -167,8 +181,14 @@ int main(int argc, char** argv) {
         }
         cerr << "[clip-vg]: Loaded " << num_intervals << " BED intervals over " << bed_intervals.size() << " sequences" << endl;
     }
-        
-    chop_path_intervals(graph.get(), bed_intervals, force_clip, progress);
+
+    if (!bed_intervals.empty()) {
+        chop_path_intervals(graph.get(), bed_intervals, force_clip, progress);
+    }
+
+    if (!replace_list.empty()) {
+        replace_path_name_substrings(graph.get(), replace_list, progress);
+    }
 
     dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
 
@@ -334,8 +354,11 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     if (progress) {
         cerr << "[clip-vg]: Clipped "
              << chopped_bases << " bases from "
-             << chopped_nodes << " nodes in "
-             << chopped_paths << " paths" << endl;
+             << chopped_nodes << " nodes";
+        if (!force_clip) {
+            cerr << " in " << chopped_paths << " paths";
+        }
+        cerr << endl;
     }
 }
 
@@ -469,4 +492,59 @@ unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
     }
     
     return chopped_handles;    
+}
+
+void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
+                                  bool progress) {
+    // parse the strings
+    vector<pair<string, string>> replace;
+    for (const string& repstring : to_replace) {
+        size_t sep = repstring.find('>');
+        if (sep == string::npos || sep == 0 || sep == repstring.length() - 1) {
+            cerr << "[clip-vg]: Unable to find separator '>' in " << repstring << ". Replacement must be"
+                 << " specified with \"s1>s2\"" << endl;
+            exit(1);
+        }
+        replace.push_back(make_pair(repstring.substr(0, sep), repstring.substr(sep + 1)));
+        if (replace.back().first == replace.back().second) {
+            replace.pop_back();
+        }
+    }
+
+    size_t replacement_count = 0;
+    size_t path_count = 0;
+    // take care to not modify path handles while iterating path handles, just in case
+    vector<string> path_names;
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            path_names.push_back(graph->get_path_name(path_handle));
+        });
+    for (string& path_name : path_names) {
+        path_handle_t path_handle = graph->get_path_handle(path_name);
+        bool changed = false;
+        for (auto& rep : replace) {
+            size_t p = path_name.find(rep.first);
+            if (p != string::npos) {
+                path_name.replace(p, rep.first.length(), rep.second);
+                ++replacement_count;
+                changed = true;
+            }
+        }
+        if (changed) {
+            ++path_count;
+            if (graph->has_path(path_name)) {
+                cerr << "[clip-vg] error: cannot change name of path from " << graph->get_path_name(path_handle) << " to "
+                     << path_name << " because the latter already exists in the graph" << endl;
+                exit(1);
+            }
+            path_handle_t new_path_handle = graph->create_path_handle(path_name, graph->get_is_circular(path_handle));
+            graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                    graph->append_step(new_path_handle, graph->get_handle_of_step(step_handle));
+                });
+            graph->destroy_path(path_handle);
+        }
+    }
+    
+    if (progress) {
+        cerr << "[clip-vg]: Replaced " << replacement_count << " substrings in " << path_count << " path names" << endl;
+    }
 }

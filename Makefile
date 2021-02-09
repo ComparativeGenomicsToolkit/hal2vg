@@ -2,7 +2,7 @@
 rootPath = ./
 include ./include.mk
 
-all : hal2vg clip-vg
+all : hal2vg clip-vg halRemoveDupes
 
 # Note: hdf5 from apt doesn't seem to work for static builds.  It should be installed
 # from source and configured with "--enable-static --disable-shared", then have its
@@ -23,12 +23,17 @@ ifeq ($(shell ldd clip-vg | grep "not a dynamic" | wc -l), $(shell ls clip-vg | 
 else
 	$(error ldd found dnymaic linked dependency in clip-vg)
 endif
+ifeq ($(shell ldd halRemoveDupes | grep "not a dynamic" | wc -l), $(shell ls halRemoveDupes | wc -l))
+	$(info ldd verified that halRemoveDupes static)
+else
+	$(error ldd found dnymaic linked dependency in halRemoveDupes)
+endif
 
 cleanFast : 
-	rm -f hal2vg hal2vg.o clip-vg clip-vg.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o
 
 clean :
-	rm -f hal2vg hal2vg.o clip-vg clip-vg.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o
 	cd deps/sonLib && make clean
 	cd deps/pinchesAndCacti && make clean
 	cd deps/hal && make clean
@@ -57,6 +62,12 @@ clip-vg.o : clip-vg.cpp ${basicLibsDependencies}
 
 clip-vg : clip-vg.o ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -fopenmp -pthread clip-vg.o  ${basicLibs}  -o clip-vg
+
+halRemoveDupes.o : halRemoveDupes.cpp ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -I . halRemoveDupes.cpp -c
+
+halRemoveDupes : halRemoveDupes.o ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -fopenmp -pthread halRemoveDupes.o  ${basicLibs}  -o halRemoveDupes
 
 test :
 	make
