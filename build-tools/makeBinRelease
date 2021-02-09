@@ -27,7 +27,6 @@ git fetch --tags origin
 REL_TAG=$(getLatestReleaseTag)
 git checkout "${REL_TAG}"
 git submodule update --init --recursive
-cp ~/dev/CMakeLists.txt ./deps/libbdsg-easy/deps/libhandlegraph/CMakeLists.txt
 
 if [ $(man gcc | grep nehalem | wc -l) -ge 1 ]
 then
