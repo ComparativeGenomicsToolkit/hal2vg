@@ -65,8 +65,11 @@ int main(int argc, char** argv) {
             TopSegment* topSeg = topIt->tseg();
             if (topSeg->hasNextParalogy()) {
                 topSeg->setNextParalogyIndex(NULL_INDEX);
-                total_length += topSeg->getLength();
-                ++total_edges;
+                if (!topSeg->isCanonicalParalog()) {
+                    topSeg->setParentIndex(NULL_INDEX);
+                    total_length += topSeg->getLength();
+                    ++total_edges;
+                }
             }
         }
 
