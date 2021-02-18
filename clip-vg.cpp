@@ -42,9 +42,9 @@ static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                                 const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
                                 bool force_clip = false,
                                 bool progress = false);
-static unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
-                                         path_handle_t path_handle,
-                                         const vector<pair<int64_t, int64_t>>& intervals);
+static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutableHandleGraph* graph,
+                                                                      path_handle_t path_handle,
+                                                                      const vector<pair<int64_t, int64_t>>& intervals);
 static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
                                          bool progress);
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
@@ -293,6 +293,8 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     // when force_clip is true, store handles here to given them second chance at destruction
     // after all paths are deleted
     unordered_set<nid_t> to_destroy;
+    // newly created subpaths
+    vector<path_handle_t> subpaths;
     
     for (auto path_handle : path_handles) {
         string path_name = graph->get_path_name(path_handle);
@@ -302,7 +304,9 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             if (progress) {
                 cerr << "[clip-vg]: Clipping " << it->second.size() << " intervals from path " << path_name << endl;
             }
-            auto chopped_handles = chop_path(graph, path_handle, it->second);
+            auto chopped_handles_subpaths = chop_path(graph, path_handle, it->second);
+            auto& chopped_handles = chopped_handles_subpaths.first;
+            subpaths.insert(subpaths.end(), chopped_handles_subpaths.second.begin(), chopped_handles_subpaths.second.end());
             if (!chopped_handles.empty()) {
 #ifdef debug
                 cerr << "destroying path " << graph->get_path_name(path_handle) << endl;
@@ -316,10 +320,7 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                             chopped_bases += graph->get_length(handle);
                             was_chopped = true;
                             ++chopped_nodes;
-                            dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
-#ifdef debug
-                            //cerr << "destroying handle " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << endl;
-#endif
+                            to_destroy.insert(graph->get_id(handle));
                         } else {
                             cerr << "[clip-vg]: Unable to clip node " << graph->get_id(handle) << ":" << graph->get_is_reverse(handle)
                                  << " in path " << path_name << " because it is found in the following other paths:\n";
@@ -338,6 +339,29 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
         }
     }
 
+    // trim out fragments between clipped regions that would otherwise be left disconnected from the graph
+    size_t removed_subpath_count = 0;
+    size_t removed_subpath_base_count = 0;
+    for (path_handle_t subpath_handle : subpaths) {
+        bool connected = false;
+        graph->for_each_step_in_path(subpath_handle, [&](step_handle_t step_handle) {
+                connected = graph->steps_of_handle(graph->get_handle_of_step(step_handle)).size() > 1;
+                return !connected;
+            });
+        if (!connected) {
+            graph->for_each_step_in_path(subpath_handle, [&](step_handle_t step_handle) {
+                    handle_t handle = graph->get_handle_of_step(step_handle);
+                    to_destroy.insert(graph->get_id(handle));
+                    removed_subpath_base_count += graph->get_length(handle);
+                });
+            graph->destroy_path(subpath_handle);
+            if (progress) {
+                cerr << "[clip-vg]: Removing orphaned subpath " << graph->get_path_name(subpath_handle) << endl;
+            }
+            ++removed_subpath_count;
+        }
+    }
+
     for (nid_t nid : to_destroy) {
         assert(graph->has_node(nid));
         handle_t handle = graph->get_handle(nid);
@@ -350,6 +374,7 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
 #endif
         }
     }
+
     
     if (progress) {
         cerr << "[clip-vg]: Clipped "
@@ -358,13 +383,16 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
         if (!force_clip) {
             cerr << " in " << chopped_paths << " paths";
         }
+        if (removed_subpath_count > 0) {
+            cerr << removed_subpath_count << " orphaned subpaths were removed with total " << removed_subpath_base_count << "bp" << endl;
+        }
         cerr << endl;
     }
 }
 
-unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
-                                  path_handle_t path_handle,
-                                  const vector<pair<int64_t, int64_t>>& intervals) {
+pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutableHandleGraph* graph,
+                                                               path_handle_t path_handle,
+                                                               const vector<pair<int64_t, int64_t>>& intervals) {
 
     // get the breakpoints
     set<int64_t> breakpoints;
@@ -491,7 +519,7 @@ unordered_set<handle_t> chop_path(MutablePathMutableHandleGraph* graph,
         cut_to(original_path_length);
     }
     
-    return chopped_handles;    
+    return make_pair(chopped_handles, subpaths);    
 }
 
 void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
