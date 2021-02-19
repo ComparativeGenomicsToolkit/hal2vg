@@ -33,6 +33,7 @@ void help(char** argv) {
        << "    -e, --ref-prefix STR      Ignore paths whose name begins with STR" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
+       << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
        << "    -p, --progress            Print progress" << endl
        << endl;
 }    
@@ -44,8 +45,8 @@ static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_strea
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                                 const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
-                                bool force_clip = false,
-                                bool progress = false);
+                                bool force_clip, bool orphan_filter,
+                                bool progress);
 static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutableHandleGraph* graph,
                                                                       path_handle_t path_handle,
                                                                       const vector<pair<int64_t, int64_t>>& intervals);
@@ -64,6 +65,7 @@ int main(int argc, char** argv) {
     string ref_prefix;
     size_t input_count = 0;
     bool force_clip = false;
+    bool orphan_filter = true;
     bool progress = false;
     vector<string> replace_list;
     int c;
@@ -78,13 +80,14 @@ int main(int argc, char** argv) {
             {"ref-prefix", required_argument, 0, 'e'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
+            {"no-orphan_filter", no_argument, 0, 'n'},
             {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:e:fr:",
+        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -110,6 +113,9 @@ int main(int argc, char** argv) {
             break;
         case 'f':
             force_clip = true;
+            break;
+        case 'n':
+            orphan_filter = false;
             break;
         case 'r':
             replace_list.push_back(optarg);
@@ -206,7 +212,7 @@ int main(int argc, char** argv) {
     }
 
     if (!bed_intervals.empty()) {
-        chop_path_intervals(graph.get(), bed_intervals, force_clip, progress);
+        chop_path_intervals(graph.get(), bed_intervals, force_clip, orphan_filter, progress);
     }
 
     if (!replace_list.empty()) {
@@ -342,7 +348,7 @@ vector<string> &split_delims(const string &s, const string& delims, vector<strin
 
 void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                          const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
-                         bool force_clip,
+                         bool force_clip, bool orphan_filter,
                          bool progress) {
 
     // keep some stats to print
@@ -417,26 +423,28 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     // trim out fragments between clipped regions that would otherwise be left disconnected from the graph
     size_t removed_subpath_count = 0;
     size_t removed_subpath_base_count = 0;
-    for (path_handle_t subpath_handle : subpaths) {
-        bool connected = false;
-        graph->for_each_step_in_path(subpath_handle, [&](step_handle_t step_handle) {
-                connected = graph->steps_of_handle(graph->get_handle_of_step(step_handle)).size() > 1;
-                return !connected;
-            });
-        if (!connected) {
+    if (orphan_filter) {
+        for (path_handle_t subpath_handle : subpaths) {
+            bool connected = false;
             graph->for_each_step_in_path(subpath_handle, [&](step_handle_t step_handle) {
-                    handle_t handle = graph->get_handle_of_step(step_handle);
-                    to_destroy.insert(graph->get_id(handle));
-                    removed_subpath_base_count += graph->get_length(handle);
+                    connected = graph->steps_of_handle(graph->get_handle_of_step(step_handle)).size() > 1;
+                    return !connected;
                 });
-            graph->destroy_path(subpath_handle);
-            if (progress) {
-                cerr << "[clip-vg]: Removing orphaned subpath " << graph->get_path_name(subpath_handle) << endl;
+            if (!connected) {
+                graph->for_each_step_in_path(subpath_handle, [&](step_handle_t step_handle) {
+                        handle_t handle = graph->get_handle_of_step(step_handle);
+                        to_destroy.insert(graph->get_id(handle));
+                        removed_subpath_base_count += graph->get_length(handle);
+                    });
+                graph->destroy_path(subpath_handle);
+                if (progress) {
+                    cerr << "[clip-vg]: Removing orphaned subpath " << graph->get_path_name(subpath_handle) << endl;
+                }
+                ++removed_subpath_count;
             }
-            ++removed_subpath_count;
         }
     }
-
+    
     for (nid_t nid : to_destroy) {
         assert(graph->has_node(nid));
         handle_t handle = graph->get_handle(nid);
