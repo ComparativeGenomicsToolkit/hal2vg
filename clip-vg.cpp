@@ -383,10 +383,11 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
         if (!force_clip) {
             cerr << " in " << chopped_paths << " paths";
         }
+        cerr << endl;        
         if (removed_subpath_count > 0) {
-            cerr << removed_subpath_count << " orphaned subpaths were removed with total " << removed_subpath_base_count << "bp" << endl;
+            cerr << "[clip-vg]: " << removed_subpath_count << " orphaned subpaths were removed with total "
+                 << removed_subpath_base_count << " bases" << endl;
         }
-        cerr << endl;
     }
 }
 
