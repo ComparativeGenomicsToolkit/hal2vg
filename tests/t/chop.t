@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=../bin:$PATH
 PATH=../deps/hal:$PATH
 
-plan tests 17
+plan tests 18
 
 #vg convert -g chop/tiny-flat.gfa -p > tiny-flat.vg
 vg convert -g chop/tiny-flat.gfa -o > tiny-flat.vg
@@ -81,3 +81,13 @@ is "$(grep 'x\[49-50\].1' bits.paths | wc -l)" "1" "last bit found"
 rm -f bits.bed chopped-bits.vg bits.paths
 
 rm -f tiny-rev.vg
+
+# quick test for forwardization
+vg convert -g chop/tiny-fr.gfa -p > tiny-fr.vg
+vg paths -Fv tiny-fr.vg > tiny-fr.fa
+clip-vg tiny-fr.vg -e x -p > tiny-fr-forwardized.vg
+vg paths -Fv tiny-fr-forwardized.vg > tiny-fr-forwardized.fa
+diff tiny-fr.fa tiny-fr-forwardized.fa
+is "$?" 0  "fowawrsization does not affect path sequence"
+
+rm -f tiny-fr.vg tiny-fr.fa tiny-fr-forwardized.vg tiny-fr-forwardized.fa tiny-fr-forwardized.fa
