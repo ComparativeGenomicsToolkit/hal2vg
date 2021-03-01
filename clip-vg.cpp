@@ -30,7 +30,7 @@ void help(char** argv) {
        << "    -b, --bed FILE            Intervals to clip in BED format" << endl
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
-       << "    -e, --ref-prefix STR      Ignore paths whose name begins with STR" << endl
+       << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
        << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
@@ -52,6 +52,8 @@ static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePat
                                                                       const vector<pair<int64_t, int64_t>>& intervals);
 static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
                                          bool progress);
+static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
+
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
     return path_name + "[" + std::to_string(offset) + "-" + std::to_string(offset + length) + "]";
@@ -157,8 +159,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (input_count == 0 && replace_list.empty()) {
-        cerr <<  "[clip-vg] error: at east one of -b, -m, -u or -r must be specified" << endl;
+    if (input_count == 0 && replace_list.empty() && ref_prefix.empty()) {
+        cerr <<  "[clip-vg] error: at east one of -b, -m, -u, -e or -r must be specified" << endl;
         return 1;
     }
 
@@ -215,6 +217,10 @@ int main(int argc, char** argv) {
         chop_path_intervals(graph.get(), bed_intervals, force_clip, orphan_filter, progress);
     }
 
+    if (!ref_prefix.empty()) {
+        forwardize_paths(graph.get(), ref_prefix, progress);  
+    }
+    
     if (!replace_list.empty()) {
         replace_path_name_substrings(graph.get(), replace_list, progress);
     }
@@ -660,3 +666,57 @@ void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const ve
         cerr << "[clip-vg]: Replaced " << replacement_count << " substrings in " << path_count << " path names" << endl;
     }
 }
+
+void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress) {
+    
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            string path_name = graph->get_path_name(path_handle);
+            if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
+                size_t fw_count = 0;
+                size_t total_steps = 0;
+                graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                        handle_t handle = graph->get_handle_of_step(step_handle);
+                        if (graph->get_is_reverse(handle)) {
+                            handle_t flipped_handle = graph->create_handle(graph->get_sequence(handle));
+                            vector<step_handle_t> steps = graph->steps_of_handle(handle);
+                            size_t ref_count = 0;
+                            for (step_handle_t step : steps) {
+                                if (graph->get_path_handle_of_step(step) == path_handle) {
+                                    ++ref_count;
+                                }
+                                step_handle_t next_step = graph->get_next_step(step);
+                                handle_t new_handle = graph->get_is_reverse(graph->get_handle_of_step(step)) ? flipped_handle :
+                                    graph->flip(flipped_handle);
+                                graph->rewrite_segment(step, next_step, {new_handle});
+                            }
+                            if (ref_count > 1) {
+                                cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << graph->get_id(handle) << endl;
+                                exit(1);
+                            }
+                            ++fw_count;
+                            assert(graph->steps_of_handle(handle).empty());
+                            dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+                        }
+                        ++total_steps;
+                    });
+                if (fw_count > 0) {
+                    cerr << "[clip-vg]: Forwardized " << fw_count << " / " << total_steps << " steps in reference path " << path_name << endl;
+                }
+            }
+        });
+
+    // do a check just to be sure
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            string path_name = graph->get_path_name(path_handle);
+            if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
+                graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                        handle_t handle = graph->get_handle_of_step(step_handle);
+                        if (graph->get_is_reverse(handle)) {
+                            cerr << "[clip-vg] error: Failed to fowardize node " << graph->get_id(handle) << " in path " << path_name << endl;
+                            exit(1);
+                        }
+                    });
+            }
+        });
+}
+
