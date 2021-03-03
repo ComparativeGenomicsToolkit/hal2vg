@@ -699,7 +699,7 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                         }
                         ++total_steps;
                     });
-                if (fw_count > 0) {
+                if (fw_count > 0 && progress) {
                     cerr << "[clip-vg]: Forwardized " << fw_count << " / " << total_steps << " steps in reference path " << path_name << endl;
                 }
             }
