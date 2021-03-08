@@ -46,6 +46,7 @@ static vector<string> &split_delims(const string &s, const string& delims, vecto
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                                 const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
                                 bool force_clip, bool orphan_filter,
+                                const string& ref_prefix,
                                 bool progress);
 static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutableHandleGraph* graph,
                                                                       path_handle_t path_handle,
@@ -53,6 +54,7 @@ static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePat
 static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
                                          bool progress);
 static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
+static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
 
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
@@ -214,7 +216,7 @@ int main(int argc, char** argv) {
     }
 
     if (!bed_intervals.empty()) {
-        chop_path_intervals(graph.get(), bed_intervals, force_clip, orphan_filter, progress);
+        chop_path_intervals(graph.get(), bed_intervals, force_clip, orphan_filter, ref_prefix, progress);
     }
 
     if (!ref_prefix.empty()) {
@@ -354,7 +356,7 @@ vector<string> &split_delims(const string &s, const string& delims, vector<strin
 
 void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                          const unordered_map<string, vector<pair<int64_t, int64_t>>>& bed_intervals,
-                         bool force_clip, bool orphan_filter,
+                         bool force_clip, bool orphan_filter, const string& ref_prefix,
                          bool progress) {
 
     // keep some stats to print
@@ -429,6 +431,8 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     // trim out fragments between clipped regions that would otherwise be left disconnected from the graph
     size_t removed_subpath_count = 0;
     size_t removed_subpath_base_count = 0;
+    size_t removed_component_count = 0;
+    size_t removed_component_base_count = 0;
     if (orphan_filter) {
         for (path_handle_t subpath_handle : subpaths) {
             bool connected = false;
@@ -449,6 +453,32 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                 ++removed_subpath_count;
             }
         }
+
+        // use the reference path prefix (if given) to clip out components that aren't anchored to it
+        // (this would take care of above filter, but we leave that one as it's not dependent on path name)
+        if (!ref_prefix.empty()) {
+            vector<unordered_set<nid_t>> components = weakly_connected_components(graph);
+            for (auto& component : components) {
+                bool ref_anchored = false;
+                for (auto ni = component.begin(); !ref_anchored && ni != component.end(); ++ni) {
+                    vector<step_handle_t> steps = graph->steps_of_handle(graph->get_handle(*ni));
+                    for (size_t si = 0; !ref_anchored && si < steps.size(); ++si) {
+                        string step_path_name = graph->get_path_name(graph->get_path_handle_of_step(steps[si]));
+                        if (step_path_name.substr(0, ref_prefix.length()) == ref_prefix) {
+                            ref_anchored = true;
+                        }
+                    }
+                }
+                if (!ref_anchored) {
+                    ++removed_component_count;
+                    for (auto node_id : component) {
+                        to_destroy.insert(node_id);                                                
+                        handle_t node_handle = graph->get_handle(node_id);
+                        removed_component_base_count += graph->get_length(node_handle);
+                    }
+                }
+            }
+        }
     }
     
     for (nid_t nid : to_destroy) {
@@ -463,7 +493,6 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
 #endif
         }
     }
-
     
     if (progress) {
         cerr << "[clip-vg]: Clipped "
@@ -476,6 +505,10 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
         if (removed_subpath_count > 0) {
             cerr << "[clip-vg]: " << removed_subpath_count << " orphaned subpaths were removed with total "
                  << removed_subpath_base_count << " bases" << endl;
+        }
+        if (removed_component_count > 0) {
+            cerr << "[clip-vg]: " << removed_component_count << " orphaned connected components were removed with total "
+                 << removed_component_base_count << " bases" << endl;
         }
     }
 }
@@ -678,6 +711,12 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         if (graph->get_is_reverse(handle)) {
                             handle_t flipped_handle = graph->create_handle(graph->get_sequence(handle));
+			    graph->follow_edges(handle, true, [&](handle_t prev_handle) {
+				graph->create_edge(prev_handle, flipped_handle);
+			      });
+			    graph->follow_edges(handle, false, [&](handle_t next_handle) {
+				graph->create_edge(flipped_handle, next_handle);
+			      });
                             vector<step_handle_t> steps = graph->steps_of_handle(handle);
                             size_t ref_count = 0;
                             for (step_handle_t step : steps) {
@@ -699,7 +738,7 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                         }
                         ++total_steps;
                     });
-                if (fw_count > 0) {
+                if (fw_count > 0 && progress) {
                     cerr << "[clip-vg]: Forwardized " << fw_count << " / " << total_steps << " steps in reference path " << path_name << endl;
                 }
             }
@@ -718,5 +757,52 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                     });
             }
         });
+}
+
+// this is pasted from libhandlegraph
+// todo: update libhandlegraph to version that contains algorithms!!!
+vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph) {
+    vector<unordered_set<nid_t>> to_return;
+    
+    // This only holds locally forward handles
+    unordered_set<handle_t> traversed;
+    
+    graph->for_each_handle([&](const handle_t& handle) {
+        
+        // Only think about it in the forward orientation
+        auto forward = graph->forward(handle);
+        
+        if (traversed.count(forward)) {
+            // Already have this node, so don't start a search from it.
+            return;
+        }
+        
+        // The stack only holds locally forward handles
+        vector<handle_t> stack{forward};
+        to_return.emplace_back();
+        while (!stack.empty()) {
+            handle_t here = stack.back();
+            stack.pop_back();
+            
+            traversed.insert(here);
+            to_return.back().insert(graph->get_id(here));
+            
+            // We have a function to handle all connected handles
+            auto handle_other = [&](const handle_t& other) {
+                // Again, make it forward
+                auto other_forward = graph->forward(other);
+                
+                if (!traversed.count(other_forward)) {
+                    stack.push_back(other_forward);
+                }
+            };
+            
+            // Look at edges in both directions
+            graph->follow_edges(here, false, handle_other);
+            graph->follow_edges(here, true, handle_other);
+            
+        }
+    });
+    return to_return;
 }
 
