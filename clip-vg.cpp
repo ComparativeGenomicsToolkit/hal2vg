@@ -473,13 +473,13 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                     ++removed_component_count;
                     for (auto node_id : component) {
                         handle_t node_handle = graph->get_handle(node_id);
+                        removed_component_base_count += graph->get_length(node_handle);
                         // destroy here instead of adding to to_destroy, becuase we don't care
                         // if there are paths or not (so don't require -f)
                         dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(node_handle);
                         if (to_destroy.count(node_id)) {
                             to_destroy.erase(node_id);
                         }
-                        removed_component_base_count += graph->get_length(node_handle);
                     }
                 }
             }
