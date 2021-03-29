@@ -2,7 +2,7 @@
 rootPath = ./
 include ./include.mk
 
-all : hal2vg clip-vg halRemoveDupes
+all : hal2vg clip-vg halRemoveDupes halMergeChroms
 
 # Note: hdf5 from apt doesn't seem to work for static builds.  It should be installed
 # from source and configured with "--enable-static --disable-shared", then have its
@@ -28,12 +28,18 @@ ifeq ($(shell ldd halRemoveDupes | grep "not a dynamic" | wc -l), $(shell ls hal
 else
 	$(error ldd found dnymaic linked dependency in halRemoveDupes)
 endif
+ifeq ($(shell ldd halMergeChroms | grep "not a dynamic" | wc -l), $(shell ls halMergeChroms | wc -l))
+	$(info ldd verified that halMergeChroms static)
+else
+	$(error ldd found dnymaic linked dependency in halMergeChroms)
+endif
+
 
 cleanFast : 
-	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o
 
 clean :
-	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o
 	cd deps/sonLib && make clean
 	cd deps/pinchesAndCacti && make clean
 	cd deps/hal && make clean
@@ -68,6 +74,12 @@ halRemoveDupes.o : halRemoveDupes.cpp ${basicLibsDependencies}
 
 halRemoveDupes : halRemoveDupes.o ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -fopenmp -pthread halRemoveDupes.o  ${basicLibs}  -o halRemoveDupes
+
+halMergeChroms.o : halMergeChroms.cpp ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -I . halMergeChroms.cpp -c
+
+halMergeChroms : halMergeChroms.o ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -fopenmp -pthread halMergeChroms.o  ${basicLibs}  -o halMergeChroms
 
 test :
 	make

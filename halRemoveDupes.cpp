@@ -4,9 +4,6 @@
  * Released under the MIT license, see LICENSE.txt
  */
 
-// This file was created by merging hal2sg.cpp and sg2vg.cpp with
-// a small amount of glue for the interface. 
-
 //#define debug
 
 #include <cstdlib>
