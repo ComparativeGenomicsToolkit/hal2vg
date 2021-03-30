@@ -189,7 +189,12 @@ static void merge_hals(CLParser* optionsParser, AlignmentPtr out_alignment, cons
             for (;!in_ti->atEnd(); in_ti->toRight(), out_ti->toRight()) {
                 // set the segment in the child genome
                 assert(out_ti->tseg()->getArrayIndex() == in_ti->tseg()->getArrayIndex() + top_offset);
-                out_ti->tseg()->setParentIndex(in_ti->tseg()->getParentIndex() + bot_offset);
+                if (in_ti->tseg()->hasParent()) {
+                    out_ti->tseg()->setParentIndex(in_ti->tseg()->getParentIndex() + bot_offset);
+                    out_ti->tseg()->setParentReversed(in_ti->tseg()->getParentReversed());
+                } else {
+                    out_ti->tseg()->setParentIndex(NULL_INDEX);
+                }
                 out_ti->tseg()->setBottomParseIndex(NULL_INDEX);
                 // determine the sequence-relative coordinate in the input
                 const Sequence* in_sequence = in_ti->tseg()->getSequence();
