@@ -33,13 +33,9 @@ static void initParser(CLParser* optionsParser) {
 }
 
 // we expect to see the same ancestor sequence names in multiple input files. we uniqify them by adding
-// .i to them where i is the file's position in the input.
+// _i to them where i is the file's position in the input.
 static string anc_seq_name(const string& seq_name, size_t idx) {
-    return seq_name + ".hmc" + to_string(idx);
-}
-// undo the above
-static string orig_seq_name(const string& seq_name) {
-    return seq_name.substr(0, seq_name.rfind(".hmc"));
+    return seq_name + "_" + to_string(idx);
 }
 
 // get the dimensions from all genomes in all input files
