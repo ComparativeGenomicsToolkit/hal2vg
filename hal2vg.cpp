@@ -96,6 +96,8 @@ static void pinch_to_handle(const Genome* genome,
 
 static void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength);
 
+static void resolve_subpath_naming(string& path_name);
+
 int main(int argc, char** argv) {
     CLParser optionsParser;
     initParser(&optionsParser);
@@ -641,6 +643,11 @@ void pinch_to_handle(const Genome* genome,
         int64_t seqID = nameToID.find(seqName)->second;
         stPinchThread* thread = stPinchThreadSet_getThread(threadSet, seqID);
 
+        // cactus_graphmap_split can make paths like contig_sub_1_3.  here we convert that
+        // into a format vg can (sometimes) understand contig[1-3].
+        // (the reason we go through this is that assembly hubs can't handle any special characters apparently)
+        resolve_subpath_naming(seqName);
+        
         // create the path
         path_handle_t pathHandle = graph.create_path_handle(seqName);
         string pathString;
@@ -762,4 +769,25 @@ void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength) {
         }
         graph.divide_handle(handle, offsets);
     }
+}
+
+void resolve_subpath_naming(string& path_name) {
+    size_t sp = path_name.rfind("_sub_");
+    if (sp != string::npos) {
+        size_t up = path_name.rfind("_");
+        if (up != string::npos && up > sp + 1) {
+            int64_t start;
+            int64_t end;
+            try {
+                start = stol(path_name.substr(sp + 5, up - sp - 5));
+                end = stol(path_name.substr(up + 1));
+            } catch (...) {
+                return;
+            }
+            stringstream new_name;
+            new_name << path_name.substr(0, sp) << "[" << start << "-" << end << "]";
+            path_name = new_name.str();
+        }
+    }
+    return;
 }
