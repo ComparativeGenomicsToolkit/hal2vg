@@ -56,9 +56,49 @@ static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, c
 static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
 
+
+// from path.cpp in vg
+// Check if using subpath naming scheme.  If it is return true,
+// the root path name, and the offset (false otherwise)
+// formats accepted:
+// name[start]  (0-based)
+// name[start-end] (0-based, open-ended like BED, end defaults to 0 in above case)
+static tuple<bool, string, size_t, size_t>parse_subpath_name(const string& path_name) {
+    size_t tag_offset = path_name.rfind("[");
+    if (tag_offset == string::npos || tag_offset + 2 >= path_name.length() || path_name.back() != ']') {
+        return make_tuple(false, "", 0, 0);
+    } else {
+        string offset_str = path_name.substr(tag_offset + 1, path_name.length() - tag_offset - 2);
+        size_t sep_offset = offset_str.find("-");
+        string end_offset_str;
+        if (sep_offset != string::npos && !offset_str.empty() && sep_offset < offset_str.length() - 1) {
+            end_offset_str = offset_str.substr(sep_offset + 1, offset_str.length() - sep_offset - 1);
+            offset_str = offset_str.substr(0, sep_offset);
+        }
+        size_t offset_val;
+        size_t end_offset_val = 0;
+        try {
+           offset_val = std::stol(offset_str);
+           if (!end_offset_str.empty()) {
+               end_offset_val = std::stol(end_offset_str);
+           }
+        } catch(...) {
+            return make_tuple(false, "", 0, 0);
+        }
+        return make_tuple(true, path_name.substr(0, tag_offset), offset_val, end_offset_val);
+    }
+}
+
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
-    return path_name + "[" + std::to_string(offset) + "-" + std::to_string(offset + length) + "]";
+    tuple<bool, string, size_t, size_t> parsed_name = parse_subpath_name(path_name);
+    size_t cur_offset = 0;
+    const string* cur_name = &path_name;
+    if (get<0>(parsed_name)) {
+        cur_offset = get<2>(parsed_name);
+        cur_name = &get<1>(parsed_name);
+    }
+    return *cur_name + "[" + std::to_string(cur_offset + offset) + "-" + std::to_string(cur_offset + offset + length) + "]";
 }
 
 int main(int argc, char** argv) {
