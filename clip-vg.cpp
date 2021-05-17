@@ -34,6 +34,7 @@ void help(char** argv) {
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
        << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
+       << "    -d, --drop-path PREFIX    Remove all paths with given PREFIX, and all nodes that are on no other paths (done after other filters)" << endl
        << "    -p, --progress            Print progress" << endl
        << endl;
 }    
@@ -55,6 +56,7 @@ static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, c
                                          bool progress);
 static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
+static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool progress);
 
 
 // from path.cpp in vg
@@ -112,6 +114,7 @@ int main(int argc, char** argv) {
     bool orphan_filter = true;
     bool progress = false;
     vector<string> replace_list;
+    string drop_prefix;
     int c;
     optind = 1; 
     while (true) {
@@ -125,13 +128,14 @@ int main(int argc, char** argv) {
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
             {"no-orphan_filter", no_argument, 0, 'n'},
+            {"drop-prefix", required_argument, 0, 'd'},
             {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:",
+        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:d:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -163,6 +167,9 @@ int main(int argc, char** argv) {
             break;
         case 'r':
             replace_list.push_back(optarg);
+            break;
+        case 'd':
+            drop_prefix = optarg;
             break;
         case 'p':
             progress = true;
@@ -265,6 +272,10 @@ int main(int argc, char** argv) {
     
     if (!replace_list.empty()) {
         replace_path_name_substrings(graph.get(), replace_list, progress);
+    }
+
+    if (!drop_prefix.empty()) {
+        drop_paths(graph.get(), drop_prefix, progress);
     }
 
     dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
@@ -851,3 +862,58 @@ vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* grap
     return to_return;
 }
 
+// this was written to filter out minigraph-only nodes from the graph (and all the minigraph paths)
+// this used to get done by hal2vg, but it's useful to keep them around so that -u option will work
+// better.  ie this way, a path that's private to a sample but still in the minigraph will be kept
+// because it aligns to two paths whereas if minigraph paths weren't in, it'd be deleted
+void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool progress) {
+
+    unordered_set<nid_t> to_destroy;
+    size_t removed_path_count = 0;
+    size_t removed_base_count = 0;
+
+    // careful not to iterate and chop, as we could hit new subpaths made
+    vector<path_handle_t> path_handles;    
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            path_handles.push_back(path_handle);
+        });
+
+    for (path_handle_t& path_handle : path_handles) {
+        string path_name = graph->get_path_name(path_handle);
+        if (path_name.compare(0, drop_prefix.length(), drop_prefix) == 0) {
+            // we've found a path with the given prefix: now destroy all handles that don't touch
+            // any path *without* the prefix
+            graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                    handle_t handle = graph->get_handle_of_step(step_handle);
+                    bool has_other_path = false;
+                    graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
+                            path_handle_t other_path_handle = graph->get_path_handle_of_step(step_handle_2);
+                            if (other_path_handle != path_handle &&
+                                graph->get_path_name(other_path_handle).compare(0, drop_prefix.length(), drop_prefix) != 0) {
+                                has_other_path = true;
+                                return false;
+                            }
+                            return true;
+                        });
+                    if (!has_other_path) {
+                        to_destroy.insert(graph->get_id(handle));
+                    }
+                });
+            // detroy the path
+            graph->destroy_path(path_handle);
+            removed_path_count++;
+        }
+        }
+
+    // destroy the nodes
+    size_t removed_node_count = to_destroy.size();
+    for (nid_t node_id : to_destroy) {
+        handle_t node_handle = graph->get_handle(node_id);
+        removed_base_count += graph->get_length(node_handle);
+        dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(node_handle);        
+    }
+
+    if (progress) {
+        cerr << "[clip-vg]: Drop prefix removed " << removed_base_count << " bases from " << removed_node_count << " nodes in " << removed_path_count << " paths" << endl;        
+    }
+}
