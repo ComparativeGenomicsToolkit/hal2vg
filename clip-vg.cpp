@@ -31,6 +31,7 @@ void help(char** argv) {
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
        << "    -s, --softmasked-only     Only clip out unaligned *softmasked* (lowercase) regions with -u" << endl
+       << "    -S, --softmasked-any      Like -s, but clip any unaligned region containing any softmasked bases" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
@@ -42,7 +43,8 @@ void help(char** argv) {
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stream, const string& ref_prefix);
 static unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                            const string& ref_prefix, bool softmasked_only);
+                                                                            const string& ref_prefix, bool softmasked_only,
+                                                                            bool softmasked_any);
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
@@ -110,6 +112,7 @@ int main(int argc, char** argv) {
     int64_t min_length = 0;
     int64_t max_unaligned = 0;
     bool unaligned_softmasked_only = false;
+    bool unaligned_softmasked_any = false;
     string ref_prefix;
     size_t input_count = 0;
     bool force_clip = false;
@@ -127,6 +130,7 @@ int main(int argc, char** argv) {
             {"min-length", required_argument, 0, 'm'},
             {"max-unaligned", required_argument, 0, 'u'},
             {"sofmasked-only", no_argument, 0, 's'},
+            {"sofmasked-any", no_argument, 0, 'S'},            
             {"ref-prefix", required_argument, 0, 'e'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
@@ -138,7 +142,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:se:fnr:d:",
+        c = getopt_long (argc, argv, "hpb:m:u:sSe:fnr:d:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -161,7 +165,10 @@ int main(int argc, char** argv) {
             break;
         case 's':
             unaligned_softmasked_only = true;
-            break;            
+            break;
+        case 'S':
+            unaligned_softmasked_any = true;
+            break;                        
         case 'e':
             ref_prefix = optarg;
             break;
@@ -224,6 +231,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (unaligned_softmasked_any && max_unaligned <= 0) {
+        cerr << "[clip-vg] error: -S must be used with -u" << endl;
+        return 1;
+    }
+
+    if (unaligned_softmasked_any && unaligned_softmasked_only) {
+        cerr << "[clip-vg] error: -S and -s cannot be used together" << endl;
+        return 1;
+    }
+
     string graph_path = argv[optind++];
     ifstream graph_stream(graph_path);
     if (!graph_stream) {
@@ -267,7 +284,7 @@ int main(int argc, char** argv) {
             });
     } else if (max_unaligned != 0) {
         // apply max unaligned length to all paths
-        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, unaligned_softmasked_only);
+        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, unaligned_softmasked_only, unaligned_softmasked_any);
     }
     
     if (progress) {
@@ -339,7 +356,8 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stre
 }
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                     const string& ref_prefix, bool softmasked_only) {
+                                                                     const string& ref_prefix, bool softmasked_only,
+                                                                     bool softmasked_any) {
     unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
 
     graph->for_each_path_handle([&](path_handle_t path_handle) {
@@ -351,10 +369,14 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         int64_t len = (int64_t)graph->get_length(handle);
                         bool aligned = false;
-                        if (softmasked_only) {
+                        if (softmasked_only || softmasked_any) {
                             // if this flag's on, we discount any handle that has an upper case character
                             string sequence = graph->get_sequence(handle);
-                            aligned = std::any_of(sequence.begin(), sequence.end(), [](unsigned char c){ return std::isupper(c); });
+                            if (softmasked_only) {
+                                aligned = std::any_of(sequence.begin(), sequence.end(), [](unsigned char c){ return std::isupper(c); });
+                            } else {
+                                aligned = std::all_of(sequence.begin(), sequence.end(), [](unsigned char c){ return std::isupper(c); });
+                            }
                         }
                         if (!aligned) {
                             graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
