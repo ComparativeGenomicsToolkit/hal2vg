@@ -772,21 +772,36 @@ void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength) {
 }
 
 void resolve_subpath_naming(string& path_name) {
-    size_t sp = path_name.rfind("_sub_");
-    if (sp != string::npos) {
-        size_t up = path_name.rfind("_");
-        if (up != string::npos && up > sp + 1) {
-            int64_t start;
-            int64_t end;
-            try {
-                start = stol(path_name.substr(sp + 5, up - sp - 5));
-                end = stol(path_name.substr(up + 1));
-            } catch (...) {
-                return;
+    size_t first_length = 0;
+    size_t start_offset = 0;
+    while (true) {
+        size_t sp = path_name.rfind("_sub_");
+        if (sp != string::npos) {
+            size_t up = path_name.rfind("_");
+            if (up != string::npos && up > sp + 1) {
+                int64_t start;
+                int64_t end;
+                try {
+                    start = stol(path_name.substr(sp + 5, up - sp - 5));
+                    end = stol(path_name.substr(up + 1));
+                } catch (...) {
+                    return;
+                }
+                stringstream new_name;
+                start_offset += start; // final offset is sum of all nested offsets
+                if (first_length == 0) {
+                    first_length = end - start;
+                    assert(first_length > 0);
+                } else {
+                    // in the case of nested subpaths, the end coordinate will always
+                    // be derived from the start, plus the length of the "top" path
+                    end = start_offset + first_length;
+                }
+                new_name << path_name.substr(0, sp) << "[" << start_offset << "-" << end << "]";
+                path_name = new_name.str();
             }
-            stringstream new_name;
-            new_name << path_name.substr(0, sp) << "[" << start << "-" << end << "]";
-            path_name = new_name.str();
+        } else {
+            break;
         }
     }
     return;
