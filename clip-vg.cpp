@@ -30,7 +30,6 @@ void help(char** argv) {
        << "    -b, --bed FILE            Intervals to clip in BED format" << endl
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
-       << "    -s, --masked-pct F        Only clip out unaligned *softmasked* (lowercase) or hardmasked regions with -u, where F is the minimum fraction of softmasked bases to count [default: 0]" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
@@ -42,7 +41,7 @@ void help(char** argv) {
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stream, const string& ref_prefix);
 static unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                            const string& ref_prefix, double softmasked_frac);
+                                                                            const string& ref_prefix);
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
@@ -109,7 +108,6 @@ int main(int argc, char** argv) {
     string bed_path;
     int64_t min_length = 0;
     int64_t max_unaligned = 0;
-    double unaligned_softmasked_frac = 0.;
     string ref_prefix;
     size_t input_count = 0;
     bool force_clip = false;
@@ -126,7 +124,6 @@ int main(int argc, char** argv) {
             {"bed", required_argument, 0, 'b'},
             {"min-length", required_argument, 0, 'm'},
             {"max-unaligned", required_argument, 0, 'u'},
-            {"masked-pct", required_argument, 0, 's'},
             {"ref-prefix", required_argument, 0, 'e'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
@@ -138,7 +135,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:s:e:fnr:d:",
+        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:d:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -158,9 +155,6 @@ int main(int argc, char** argv) {
         case 'u':
             max_unaligned = stol(optarg);
             ++input_count;
-            break;
-        case 's':
-            unaligned_softmasked_frac = stof(optarg);
             break;
         case 'e':
             ref_prefix = optarg;
@@ -219,11 +213,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (unaligned_softmasked_frac > 0 && max_unaligned <= 0) {
-        cerr << "[clip-vg] error: -s must be used with -u" << endl;
-        return 1;
-    }
-
     string graph_path = argv[optind++];
     ifstream graph_stream(graph_path);
     if (!graph_stream) {
@@ -234,11 +223,6 @@ int main(int argc, char** argv) {
     graph_stream.close();
     if (progress) {
         cerr << "[clip-vg]: Loaded graph" << endl;
-    }
-
-    if (unaligned_softmasked_frac && !dynamic_cast<bdsg::HashGraph*>(graph.get())) {
-        cerr << "[clip-vg]: -s option only works with HashGraph inputs (as it requires softmasked sequence)" << endl;
-        return 1;
     }
 
     unordered_map<string, vector<pair<int64_t, int64_t>>> bed_intervals;
@@ -267,7 +251,7 @@ int main(int argc, char** argv) {
             });
     } else if (max_unaligned != 0) {
         // apply max unaligned length to all paths
-        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, unaligned_softmasked_frac);
+        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix);
     }
     
     if (progress) {
@@ -339,7 +323,7 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stre
 }
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                     const string& ref_prefix, double softmasked_frac) {
+                                                                     const string& ref_prefix) {
     unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
 
     graph->for_each_path_handle([&](path_handle_t path_handle) {
@@ -347,7 +331,6 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
             if (ref_prefix.empty() || path_name.substr(0, ref_prefix.length()) != ref_prefix) {
                 int64_t offset = 0;
                 int64_t start = -1;
-                int64_t sm_count = 0;
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         int64_t len = (int64_t)graph->get_length(handle);
@@ -361,37 +344,25 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                         // start an unaligned interval
                         if (start < 0 && aligned == false) {
                             start = offset;
-                            sm_count = 0;
                         }
-
-                        // count the softmasked bases
-                        if (!aligned && softmasked_frac > 0.) {
-                            string sequence = graph->get_sequence(handle);
-                            for (size_t i = 0; i < len; ++i) {
-                                if (std::islower(sequence[i]) || sequence[i] == 'N') {
-                                    ++sm_count;
-                                }
-                            }                            
-                        }
-                        
                         // end an unaligned interval
                         if (aligned == true) {
-                            if (start >=0 && offset > max_unaligned && sm_count)
-                            if (start >= 0 && offset - start > max_unaligned && (double)sm_count / (double)(offset-start) >= softmasked_frac) {
+                            if (start >= 0 && offset + len - start > max_unaligned) {
                                 intervals[path_name].push_back(make_pair(start, offset));
                             }
                             start = -1;
                         }
                         offset += len;
                     });
-                if (start >= 0 && offset - start > max_unaligned && (double)sm_count / (double)(offset-start) >= softmasked_frac) {
+                if (start >= 0 && offset - start > max_unaligned) {
                     intervals[path_name].push_back(make_pair(start, offset));
                 }
             }
         });
     return intervals;
 }
-                                    
+
+
 unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream) {
 
     char magic_bytes[4];
