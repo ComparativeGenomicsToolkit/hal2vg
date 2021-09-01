@@ -282,10 +282,10 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
             TopSegmentIteratorPtr out_top = out_sequence->getTopSegmentIterator();
             
             int64_t cur_pos = 0;
-            int64_t frag_start = -1;
             vector<const Sequence*>& frags = nf.second;
             for (size_t i = 0; i < frags.size(); ++i) {
                 const Sequence* in_sequence_frag = frags[i];
+                int64_t frag_start = -1;
                 if (target_set.count(name)) {
                     parse_subpath_name(in_sequence_frag->getName(), &frag_start);
                 }
@@ -294,11 +294,17 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                 }
                 if (frag_start > cur_pos + 1) {
                     // need to add a gap *before* this fragment                    
-                    out_top->tseg()->setCoordinates(cur_pos, out_sequence->getStartPosition() + frag_start - cur_pos);
+                    out_top->tseg()->setCoordinates(cur_pos + out_sequence->getStartPosition(), frag_start - cur_pos);
                     out_top->tseg()->setParentIndex(NULL_INDEX);
                     out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
                     out_top->tseg()->setBottomParseIndex(NULL_INDEX);
+#ifdef debug
+                    cerr << "cur_pos=" << cur_pos << flush;
+#endif
                     cur_pos += out_top->tseg()->getLength();
+#ifdef debug
+                    cerr << " after adding start gap cur_pos=" << cur_pos << " (frag " << i << " name=" << in_sequence_frag->getName() << " fragstart=" << frag_start << ")" << endl;
+#endif
                     out_top->toRight();
                 }
                 // copy the fragment.  note that the ancestor coordinates haven't changed
@@ -325,8 +331,13 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                         out_botit->bseg()->setChildReversed(out_child_no, out_top->tseg()->getParentReversed());
                     }
                     out_top->tseg()->setBottomParseIndex(NULL_INDEX);
-                    
-                    cur_pos += out_top->tseg()->getLength();         
+#ifdef debug
+                    cerr << "cur_pos=" << cur_pos << flush;
+#endif
+                    cur_pos += out_top->tseg()->getLength();
+#ifdef debug
+                    cerr << " after adding frag " << j << " cur_pos=" << cur_pos << endl;
+#endif
                     frag_top->toRight();
                     out_top->toRight();
                 }            
@@ -337,7 +348,13 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                 out_top->tseg()->setParentIndex(NULL_INDEX);
                 out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
                 out_top->tseg()->setBottomParseIndex(NULL_INDEX);
-                cur_pos += out_top->tseg()->getLength();                
+#ifdef debug
+                cerr << "cur_pos="<< cur_pos << flush;
+#endif
+                cur_pos += out_top->tseg()->getLength();
+#ifdef debug
+                cerr << " after adding end gap cur_pos=" << cur_pos << endl;
+#endif
                 out_top->toRight();
             }
             if (cur_pos != (int64_t)out_sequence->getSequenceLength()) {
