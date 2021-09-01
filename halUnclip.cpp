@@ -35,6 +35,10 @@ static void initParser(CLParser* optionsParser) {
     optionsParser->addOptionFlag("validate",
                                  "run a (non-exhaustive) check on the output",
                                  false);
+    optionsParser->addOption("targetGenomes",
+                             "comma-separated (no spaces) list of target genomes "
+                             "(others are not unclipped) (all leaves if empty)",
+                             "\"\"");
     optionsParser->setDescription("Fill back clipped sequence (removed by cactus-preprocess) using the original fasta files"
         ". Star trees only");
 }
@@ -90,7 +94,7 @@ static unordered_map<string, pair<size_t, string>> read_fasta(const string& fa_p
 }
 
 // do a pass over the seqfile to get the total lengths of every sequence
-static unordered_map<string, size_t> get_dimensions_from_seqfile(const string& seqfile_path) {
+static unordered_map<string, size_t> get_dimensions_from_seqfile(const string& seqfile_path, const unordered_set<string>& target_set) {
     unordered_map<string, size_t> seq_map;
     
     ifstream seqfile(seqfile_path);
@@ -105,9 +109,11 @@ static unordered_map<string, size_t> get_dimensions_from_seqfile(const string& s
         if (toks.size() == 2) {
             string name = toks[0];
             string fa_path = toks[1];
-            unordered_map<string, pair<size_t, string>> fa_info = read_fasta(fa_path);
-            for (auto& fi : fa_info) {
-                seq_map[name + "." + fi.first] = fi.second.first;
+            if (target_set.count(name)) {
+                unordered_map<string, pair<size_t, string>> fa_info = read_fasta(fa_path);
+                for (auto& fi : fa_info) {
+                    seq_map[name + "." + fi.first] = fi.second.first;
+                }
             }
         }
     }
@@ -115,7 +121,8 @@ static unordered_map<string, size_t> get_dimensions_from_seqfile(const string& s
     return seq_map;
 }
 
-static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(AlignmentConstPtr alignment, unordered_map<string, size_t>& seq_d, bool progress) {
+static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(AlignmentConstPtr alignment, unordered_map<string, size_t>& seq_d,
+                                                                           const unordered_set<string>& target_set, bool progress) {
 
     unordered_map<string, vector<Sequence::Info>> dim_map;
 
@@ -143,7 +150,7 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
         for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
             const Sequence *sequence = seqIt->getSequence();
             string sequence_name = sequence->getName();
-            string parsed_name = parse_subpath_name(sequence_name);
+            string parsed_name = target_set.count(genome->getName()) ? parse_subpath_name(sequence_name) : sequence_name;
             string full_name = genome->getName() + "." + parsed_name;
             size_t fa_len = sequence->getSequenceLength();
             if (!seq_d.count(full_name)) {
@@ -218,7 +225,8 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
     return dim_map;
 }
 
-static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const unordered_map<string, size_t>& seq_dims, bool progress) {
+static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const unordered_map<string, size_t>& seq_dims,
+                          const unordered_set<string>& target_set, bool progress) {
 
     // just copy the root
     if (progress) {
@@ -261,7 +269,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
         for (SequenceIteratorPtr seqIt = in_genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
             const Sequence *sequence = seqIt->getSequence();
             string sequence_name = sequence->getName();
-            string parsed_name = parse_subpath_name(sequence_name);
+            string parsed_name = target_set.count(name) ? parse_subpath_name(sequence_name) : sequence_name;
             frag_map[parsed_name].push_back(sequence);
         }
 
@@ -278,7 +286,9 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
             vector<const Sequence*>& frags = nf.second;
             for (size_t i = 0; i < frags.size(); ++i) {
                 const Sequence* in_sequence_frag = frags[i];
-                parse_subpath_name(in_sequence_frag->getName(), &frag_start);
+                if (target_set.count(name)) {
+                    parse_subpath_name(in_sequence_frag->getName(), &frag_start);
+                }
                 if (frag_start == -1) {
                     frag_start = 0;
                 }
@@ -446,6 +456,7 @@ int main(int argc, char** argv) {
     string in_hal_path;
     string out_hal_path;
     string seqfile_path;
+    string target_genomes;
     bool progress;
     bool validate;
     try {
@@ -453,6 +464,7 @@ int main(int argc, char** argv) {
         in_hal_path = optionsParser.getArgument<string>("inFile");
         seqfile_path = optionsParser.getArgument<string>("seqFile");
         out_hal_path = optionsParser.getArgument<string>("outFile");
+        target_genomes = optionsParser.getOption<string>("targetGenomes");
         progress = optionsParser.getFlag("progress");
         validate = optionsParser.getFlag("validate");
     }
@@ -474,16 +486,33 @@ int main(int argc, char** argv) {
     }    
     AlignmentPtr out_alignment(openHalAlignment(out_hal_path, &optionsParser, READ_ACCESS | WRITE_ACCESS | CREATE_ACCESS));
 
+    // check the targets, defaulting to all leaves
+    vector<string> target_names;
+    if (target_genomes != "\"\"") {
+        target_names = chopString(target_genomes, ",");
+        for (const string& name : target_names) {
+            const Genome* genome = in_alignment->openGenome(name);
+            if (genome == nullptr) {
+                cerr << "[halUnclip]: Target genome " << name << " not present in input HAL" << endl;
+                exit(1);
+            }
+            in_alignment->closeGenome(genome);
+        }
+    } else {
+        target_names = in_alignment->getChildNames(in_alignment->getRootName());
+    }
+    unordered_set<string> target_set(target_names.begin(), target_names.end());
+
     // and load the fasta sequence sizes from the seqfile
     if (progress) {
         cerr << "[halUnclip]: Reading fasta dimensions from seqfile" << endl;
     }
-    unordered_map<string, size_t> seq_dims = get_dimensions_from_seqfile(seqfile_path);
+    unordered_map<string, size_t> seq_dims = get_dimensions_from_seqfile(seqfile_path, target_set);
 
     if (progress) {
         cerr << "[halUnclip]: Computing new hal dimensions" << endl;
     }
-    unordered_map<string, vector<Sequence::Info>> dimensions = get_filled_dimensions(in_alignment, seq_dims, progress);
+    unordered_map<string, vector<Sequence::Info>> dimensions = get_filled_dimensions(in_alignment, seq_dims, target_set, progress);
 
     // set up the size of each genome, staring with the root
     string root_name = in_alignment->getRootName();
@@ -508,7 +537,7 @@ int main(int argc, char** argv) {
     if (progress) {
         cerr << "[halUnclip]: Copying and filling the graph" << endl;
     }
-    copy_and_fill(in_alignment, out_alignment, seq_dims, progress);
+    copy_and_fill(in_alignment, out_alignment, seq_dims, target_set, progress);
 
     // add back the fasta sequences
     if (progress) {
