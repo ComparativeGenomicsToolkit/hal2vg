@@ -310,7 +310,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                      << out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() << " - "
                      << (out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() + in_sequence_frag->getNumTopSegments()) << endl;
 #endif
-                for (size_t i = 0; i < in_sequence_frag->getNumTopSegments(); ++i) {
+                for (size_t j = 0; j < in_sequence_frag->getNumTopSegments(); ++j) {
                     out_top->tseg()->setCoordinates(out_sequence->getStartPosition() + cur_pos, frag_top->tseg()->getLength());
                     out_top->tseg()->setParentIndex(frag_top->tseg()->getParentIndex());
                     out_top->tseg()->setParentReversed(frag_top->tseg()->getParentReversed());
@@ -339,6 +339,15 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                 out_top->tseg()->setBottomParseIndex(NULL_INDEX);
                 cur_pos += out_top->tseg()->getLength();                
                 out_top->toRight();
+            }
+            if (cur_pos != (int64_t)out_sequence->getSequenceLength()) {
+                cerr << "[halUnclip]: sanity check fail for sequence " << name << "." << base_name << ".  The offset after conversion is "
+                     << cur_pos << " which is different than the sequence length of " << out_sequence->getSequenceLength() << endl
+                     << "[halUnclip]: the fragments are\n";
+                for (size_t i = 0; i < frags.size(); ++i) {
+                    const Sequence* in_sequence_frag = frags[i];
+                    cerr << "     " << in_sequence_frag->getName() << " len=" << in_sequence_frag->getSequenceLength() << endl;                    
+                }
             }
             assert(cur_pos == (int64_t)out_sequence->getSequenceLength());
 
