@@ -117,9 +117,15 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
 
     unordered_map<string, vector<Sequence::Info>> dim_map;
 
+    // copy root exactly as is
+    vector<Sequence::Info>& root_dims = dim_map[alignment->getRootName()];
+    const Genome* root_genome = alignment->openGenome(alignment->getRootName());
+    for (SequenceIteratorPtr seqIt = root_genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
+        const Sequence *sequence = seqIt->getSequence();
+        root_dims.push_back(Sequence::Info(sequence->getName(), sequence->getSequenceLength(), sequence->getNumTopSegments(), sequence->getNumBottomSegments()));
+    }
     
     vector<string> names = alignment->getChildNames(alignment->getRootName());
-    names.push_back(alignment->getRootName());
 
     for (const string& name : names) {
         const Genome* genome = alignment->openGenome(name);
@@ -138,13 +144,11 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
             string parsed_name = parse_subpath_name(sequence_name);
             string full_name = genome->getName() + "." + parsed_name;
             size_t fa_len = sequence->getSequenceLength();
-            if (name != alignment->getRootName()) {
-                if (!seq_d.count(full_name)) {
-                    cerr << "[halUnclip]: Unable to find sequence (from HAL) " << full_name << " in dimension map from input fasta" << endl;
-                    exit(1);
-                }
-                fa_len = seq_d.at(full_name);
+            if (!seq_d.count(full_name)) {
+                cerr << "[halUnclip]: Unable to find sequence (from HAL) " << full_name << " in dimension map from input fasta" << endl;
+                exit(1);
             }
+            fa_len = seq_d.at(full_name);
             if (parsed_name == sequence_name && sequence->getSequenceLength() != fa_len) {
                 cerr << "[halUnclip]: Sequence " << full_name << " has len=" << fa_len << " in fasta but len=" << sequence->getSequenceLength() << " in hal" << endl;
                 exit(1);
@@ -163,12 +167,7 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
             string full_name = genome->getName() + "." + base_name;
             vector<const Sequence*>& frags = nf.second;
             size_t fa_len;
-            if (name == alignment->getRootName()) {
-                assert(frags.size() == 1);
-                fa_len = frags[0]->getSequenceLength();
-            } else {
-                fa_len = seq_d.at(full_name);
-            }
+            fa_len = seq_d.at(full_name);
             // sort the fragments by start position
             map<size_t, const Sequence*> start_to_frag;
             for (const Sequence* frag : frags) {
@@ -204,11 +203,7 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
                 // gap in back
                 ++gaps;
             }
-            if (name == alignment->getRootName()) {
-                dimensions.push_back(Sequence::Info(base_name, fa_len, 0, frags[0]->getNumBottomSegments()));
-            } else {
-                dimensions.push_back(Sequence::Info(base_name, fa_len, top + gaps, 0));
-            }
+            dimensions.push_back(Sequence::Info(base_name, fa_len, top + gaps, 0));
         }
         
         alignment->closeGenome(genome);
@@ -218,7 +213,6 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
 }
 
 static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const unordered_map<string, size_t>& seq_dims) {
-
 
     // just copy the root
     const Genome* in_root_genome = in_alignment->openGenome(in_alignment->getRootName());
@@ -234,6 +228,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
             out_botit->bseg()->setChildIndex(j, NULL_INDEX);
             out_botit->bseg()->setChildReversed(j, false);
         }
+        out_botit->bseg()->setTopParseIndex(NULL_INDEX);
         in_botit->toRight();
         out_botit->toRight();
     }
@@ -264,7 +259,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
             Sequence* out_sequence = out_genome->getSequence(base_name);
             assert(out_sequence != nullptr);
             TopSegmentIteratorPtr out_top = out_sequence->getTopSegmentIterator();
-
+            
             int64_t cur_pos = 0;
             int64_t frag_start = -1;
             vector<const Sequence*>& frags = nf.second;
@@ -275,10 +270,11 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                     frag_start = 0;
                 }
                 if (frag_start > cur_pos + 1) {
-                    // need to add a gap *before* this fragment
-                    out_top->tseg()->setCoordinates(cur_pos, frag_start - cur_pos);
+                    // need to add a gap *before* this fragment                    
+                    out_top->tseg()->setCoordinates(cur_pos, out_sequence->getStartPosition() + frag_start - cur_pos);
                     out_top->tseg()->setParentIndex(NULL_INDEX);
                     out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
+                    out_top->tseg()->setBottomParseIndex(NULL_INDEX);
                     cur_pos += out_top->tseg()->getLength();
                     out_top->toRight();
                 }
@@ -286,44 +282,49 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                 // any, so those coordinates can go directly
                 TopSegmentIteratorPtr frag_top = in_sequence_frag->getTopSegmentIterator();
                 int64_t out_top_offset = out_top->tseg()->getArrayIndex();
+                cerr << "frag " << in_sequence_frag->getFullName() << " has " << in_sequence_frag->getNumTopSegments() << " topsegs which will map to range "
+                     << out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() << " - "
+                     << (out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() + in_sequence_frag->getNumTopSegments()) << endl;
                 for (size_t i = 0; i < in_sequence_frag->getNumTopSegments(); ++i) {
-
-                    out_top->tseg()->setCoordinates(cur_pos, frag_top->tseg()->getLength());
+                    out_top->tseg()->setCoordinates(out_sequence->getStartPosition() + cur_pos, frag_top->tseg()->getLength());
                     out_top->tseg()->setParentIndex(frag_top->tseg()->getParentIndex());
                     out_top->tseg()->setParentReversed(frag_top->tseg()->getParentReversed());
                     if (frag_top->tseg()->hasNextParalogy()) {
                         out_top->tseg()->setNextParalogyIndex(frag_top->tseg()->getNextParalogyIndex() + out_top_offset);
+                    } else {
+                        out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
                     }
                     if (frag_top->tseg()->hasParent()) {
                         out_botit->toParent(out_top);
                         out_botit->bseg()->setChildIndex(out_child_no, out_top->tseg()->getArrayIndex());
                         out_botit->bseg()->setChildReversed(out_child_no, out_top->tseg()->getParentReversed());
                     }
-                    cur_pos += out_top->tseg()->getLength();
-                    cerr << "added fragment " << in_sequence_frag->getFullName() << " cur pos: " << cur_pos << endl;
+                    out_top->tseg()->setBottomParseIndex(NULL_INDEX);
+                    
+                    cur_pos += out_top->tseg()->getLength();         
                     frag_top->toRight();
                     out_top->toRight();
                 }            
             }
             if (cur_pos < (int64_t)out_sequence->getSequenceLength()) {
                 // needto add a gap *after* the last fragment
-                out_top->tseg()->setCoordinates(cur_pos, (int64_t)out_sequence->getSequenceLength() - cur_pos);
+                out_top->tseg()->setCoordinates(out_sequence->getStartPosition() + cur_pos, (int64_t)out_sequence->getSequenceLength() - cur_pos);
                 out_top->tseg()->setParentIndex(NULL_INDEX);
                 out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
-                cur_pos += out_top->tseg()->getLength();
+                out_top->tseg()->setBottomParseIndex(NULL_INDEX);
+                cur_pos += out_top->tseg()->getLength();                
                 out_top->toRight();
             }
-            cerr << "cur_pos " << cur_pos << " vs slen " << out_sequence->getSequenceLength() << endl;
             assert(cur_pos == (int64_t)out_sequence->getSequenceLength());
-        }
 
+        }
         in_alignment->closeGenome(in_genome);
         out_alignment->closeGenome(out_genome);
     }
 }
 
 // go in and rewerite the sequences from the fasta
-void add_fasta_sequences(AlignmentPtr out_alignment, const string& seqfile_path) {
+void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const string& seqfile_path) {
     ifstream seqfile(seqfile_path);
     if (!seqfile) {
         cerr << "[halUnclip]: Unable to open seqfile: " << seqfile_path << endl;
@@ -348,11 +349,22 @@ void add_fasta_sequences(AlignmentPtr out_alignment, const string& seqfile_path)
             }
         }
     }
+
+    const Genome* in_root_genome = in_alignment->openGenome(in_alignment->getRootName());
+    Genome* out_root_genome = out_alignment->openGenome(in_alignment->getRootName());
+    for (SequenceIteratorPtr seqIt = in_root_genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
+        const Sequence* in_sequence = seqIt->getSequence();
+        Sequence* out_sequence = out_root_genome->getSequence(in_sequence->getName());
+        in_sequence->getString(buffer);
+        out_sequence->setString(buffer);
+    }    
 }
 
 
 // root->leaf alignments are consistent
 static void validate_alignments(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment) {
+
+    validateAlignment(out_alignment.get());
 
     const Genome* in_root_genome = in_alignment->openGenome(in_alignment->getRootName());
     Genome* out_root_genome = out_alignment->openGenome(in_alignment->getRootName());
@@ -462,7 +474,7 @@ int main(int argc, char** argv) {
     if (progress) {
         cerr << "[halUnclip]: Adding fasta sequences" << endl;
     }    
-    add_fasta_sequences(out_alignment, seqfile_path);
+    add_fasta_sequences(in_alignment, out_alignment, seqfile_path);
 
     if (validate) {
         if (progress) {
