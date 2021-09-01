@@ -34,7 +34,7 @@ static void initParser(CLParser* optionsParser) {
                                  false);
     optionsParser->addOptionFlag("validate",
                                  "run a (non-exhaustive) check on the output",
-                                 false);    
+                                 false);
     optionsParser->setDescription("Fill back clipped sequence (removed by cactus-preprocess) using the original fasta files"
         ". Star trees only");
 }
@@ -147,10 +147,13 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
             string full_name = genome->getName() + "." + parsed_name;
             size_t fa_len = sequence->getSequenceLength();
             if (!seq_d.count(full_name)) {
-                cerr << "[halUnclip]: Unable to find sequence (from HAL) " << full_name << " in dimension map from input fasta" << endl;
-                exit(1);
+                if (parsed_name != sequence_name) {
+                    cerr << "[halUnclip]: Unable to find sequence (from HAL) " << full_name << " in dimension map from input fasta" << endl;
+                    exit(1);
+                }
+            } else {
+                fa_len = seq_d.at(full_name);
             }
-            fa_len = seq_d.at(full_name);
             if (parsed_name == sequence_name && sequence->getSequenceLength() != fa_len) {
                 cerr << "[halUnclip]: Sequence " << full_name << " has len=" << fa_len << " in fasta but len=" << sequence->getSequenceLength() << " in hal" << endl;
                 exit(1);
