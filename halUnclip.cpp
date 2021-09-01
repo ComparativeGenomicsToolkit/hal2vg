@@ -340,6 +340,7 @@ void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignm
     }
 
     string buffer;
+    set<string> done_set;
     while (getline(seqfile, buffer)) {
         vector<string> toks = split_delims(buffer, " \t");
         if (toks.size() == 2) {
@@ -355,17 +356,30 @@ void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignm
                     sequence->setString(fi.second.second);
                 }
             }
+            done_set.insert(name);
         }
     }
 
-    const Genome* in_root_genome = in_alignment->openGenome(in_alignment->getRootName());
-    Genome* out_root_genome = out_alignment->openGenome(in_alignment->getRootName());
-    for (SequenceIteratorPtr seqIt = in_root_genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
-        const Sequence* in_sequence = seqIt->getSequence();
-        Sequence* out_sequence = out_root_genome->getSequence(in_sequence->getName());
-        in_sequence->getString(buffer);
-        out_sequence->setString(buffer);
-    }    
+    // if there's no _sub sequences found, a genome is allowed to not be in the sequence map
+    // this is generally the case for the root, but could be the minigraph contigs
+    vector<string> names = in_alignment->getChildNames(in_alignment->getRootName());
+    names.push_back(in_alignment->getRootName());
+    for (const string& name : names) {
+        if (!done_set.count(name)) {
+            const Genome* in_genome = in_alignment->openGenome(name);
+            Genome* out_genome = out_alignment->openGenome(name);
+            for (SequenceIteratorPtr seqIt = in_genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
+                const Sequence* in_sequence = seqIt->getSequence();
+                Sequence* out_sequence = out_genome->getSequence(in_sequence->getName());
+                in_sequence->getString(buffer);
+                out_sequence->setString(buffer);
+            }
+            if (name != in_alignment->getRootName()) {
+                in_alignment->closeGenome(in_genome);
+                out_alignment->closeGenome(out_genome);
+            }
+        }
+    }
 }
 
 
