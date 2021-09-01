@@ -84,6 +84,8 @@ static unordered_map<string, pair<size_t, string>> read_fasta(const string& fa_p
     destructList(seq_lens);
     destructList(seq_names);
 
+    fclose(fa_file);
+
     return fa_info;
 }
 
