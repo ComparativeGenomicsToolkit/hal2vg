@@ -115,7 +115,7 @@ static unordered_map<string, size_t> get_dimensions_from_seqfile(const string& s
     return seq_map;
 }
 
-static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(AlignmentConstPtr alignment, const unordered_map<string, size_t>& seq_d, bool progress) {
+static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(AlignmentConstPtr alignment, unordered_map<string, size_t>& seq_d, bool progress) {
 
     unordered_map<string, vector<Sequence::Info>> dim_map;
 
@@ -151,6 +151,7 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
                     cerr << "[halUnclip]: Unable to find sequence (from HAL) " << full_name << " in dimension map from input fasta" << endl;
                     exit(1);
                 }
+                seq_d[full_name] = fa_len;
             } else {
                 fa_len = seq_d.at(full_name);
             }
