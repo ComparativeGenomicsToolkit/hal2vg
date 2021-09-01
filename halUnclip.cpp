@@ -218,9 +218,12 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
     return dim_map;
 }
 
-static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const unordered_map<string, size_t>& seq_dims) {
+static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const unordered_map<string, size_t>& seq_dims, bool progress) {
 
     // just copy the root
+    if (progress) {
+        cerr << "[halUnclip]: Copying root segments" << endl;
+    }
     const Genome* in_root_genome = in_alignment->openGenome(in_alignment->getRootName());
     Genome* out_root_genome = out_alignment->openGenome(in_alignment->getRootName());
     BottomSegmentIteratorPtr in_botit = in_root_genome->getBottomSegmentIterator();
@@ -242,6 +245,10 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
     vector<string> names = in_alignment->getChildNames(in_alignment->getRootName());
 
     for (const string& name : names) {
+        if (progress) {
+            cerr << "[halUnclip]: Copying segments of " << name << endl;
+        }
+
         const Genome* in_genome = in_alignment->openGenome(name);
         Genome* out_genome = out_alignment->openGenome(name);
         hal_index_t out_child_no = out_root_genome->getChildIndex(out_genome);
@@ -501,7 +508,7 @@ int main(int argc, char** argv) {
     if (progress) {
         cerr << "[halUnclip]: Copying and filling the graph" << endl;
     }
-    copy_and_fill(in_alignment, out_alignment, seq_dims);
+    copy_and_fill(in_alignment, out_alignment, seq_dims, progress);
 
     // add back the fasta sequences
     if (progress) {
