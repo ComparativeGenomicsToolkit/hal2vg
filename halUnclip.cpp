@@ -282,9 +282,11 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                 // any, so those coordinates can go directly
                 TopSegmentIteratorPtr frag_top = in_sequence_frag->getTopSegmentIterator();
                 int64_t out_top_offset = out_top->tseg()->getArrayIndex();
+#ifdef debug
                 cerr << "frag " << in_sequence_frag->getFullName() << " has " << in_sequence_frag->getNumTopSegments() << " topsegs which will map to range "
                      << out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() << " - "
                      << (out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() + in_sequence_frag->getNumTopSegments()) << endl;
+#endif
                 for (size_t i = 0; i < in_sequence_frag->getNumTopSegments(); ++i) {
                     out_top->tseg()->setCoordinates(out_sequence->getStartPosition() + cur_pos, frag_top->tseg()->getLength());
                     out_top->tseg()->setParentIndex(frag_top->tseg()->getParentIndex());
@@ -391,6 +393,17 @@ static void validate_alignments(AlignmentConstPtr in_alignment, AlignmentPtr out
             in_topit->getString(s1);
             out_topit->getString(s2);
             assert(s1 == s2);
+
+            string in_seq_name = in_topit->tseg()->getSequence()->getName();
+            string out_seq_name = out_topit->tseg()->getSequence()->getName();
+            int64_t start;
+            string in_base_name = parse_subpath_name(in_seq_name, &start);
+            assert(in_base_name == out_seq_name);
+            assert(in_topit->getReversed() == out_topit->getReversed());
+            if (!in_topit->getReversed()) {
+                // punt on reverse check for now
+                assert(in_topit->getStartPosition() + start == out_topit->getStartPosition());
+            }
 
             in_botit->toRight();
             out_botit->toRight();
