@@ -329,16 +329,14 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
 #endif
                     out_top->toRight();
                 }
-                // copy the fragment.  note that the ancestor coordinates haven't changed
-                // any, so those coordinates can go directly
-                TopSegmentIteratorPtr frag_top = in_sequence_frag->getTopSegmentIterator();
 #ifdef debug
                 cerr << "frag " << in_sequence_frag->getFullName() << " has " << in_sequence_frag->getNumTopSegments() << " topsegs which will map to range "
                      << out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() << " - "
                      << (out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() + in_sequence_frag->getNumTopSegments()) << endl;
 #endif
-                size_t num_top = in_sequence_frag->getNumTopSegments();
-                for (size_t j = 0; j < num_top; ++j) {
+                // copy the fragment.  note that the ancestor coordinates haven't changed
+                // any, so those coordinates can go directly
+                for (TopSegmentIteratorPtr frag_top = in_sequence_frag->getTopSegmentIterator(); !frag_top->atEnd(); frag_top->toRight()) {
                     ts = out_top->tseg();
                     ts->setCoordinates(out_start + cur_pos, frag_top->tseg()->getLength());
                     ts->setParentIndex(frag_top->tseg()->getParentIndex());
