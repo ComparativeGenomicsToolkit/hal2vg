@@ -426,12 +426,14 @@ void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignm
     }
 
     string buffer;
+    set<string> done_set;
     while (getline(seqfile, buffer)) {
         vector<string> toks = split_delims(buffer, " \t");
         if (toks.size() == 2) {
             string name = toks[0];
             string fa_path = toks[1];
             if (target_set.count(name)) {
+                done_set.insert(name);
                 if (progress) {
                     cerr << "[halUnclip]: Loading fasta for " << name << " ... " << flush;
                 }
@@ -457,7 +459,7 @@ void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignm
     vector<string> names = in_alignment->getChildNames(in_alignment->getRootName());
     names.push_back(in_alignment->getRootName());
     for (const string& name : names) {
-        if (!target_set.count(name)) {
+        if (!done_set.count(name)) {
             if (progress) {
                 cerr << "[halUnclip]: Directly copying dna strings for " << name << endl;
             };
