@@ -418,7 +418,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
 }
 
 // go in and rewerite the sequences from the fasta
-void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const string& seqfile_path) {
+void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const string& seqfile_path, const unordered_set<string>& target_set, bool progress) {
     ifstream seqfile(seqfile_path);
     if (!seqfile) {
         cerr << "[halUnclip]: Unable to open seqfile: " << seqfile_path << endl;
@@ -426,23 +426,29 @@ void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignm
     }
 
     string buffer;
-    set<string> done_set;
     while (getline(seqfile, buffer)) {
         vector<string> toks = split_delims(buffer, " \t");
         if (toks.size() == 2) {
             string name = toks[0];
             string fa_path = toks[1];
-            unordered_map<string, pair<size_t, string>> fa_info = read_fasta(fa_path);
-            Genome* genome = out_alignment->openGenome(name);
-            assert(genome != nullptr);
-            for (auto& fi : fa_info) {
-                Sequence* sequence = genome->getSequence(fi.first);
-                if (sequence != nullptr) {
-                    assert(sequence->getSequenceLength() == fi.second.first);
-                    sequence->setString(fi.second.second);
+            if (target_set.count(name)) {
+                if (progress) {
+                    cerr << "[halUnclip]: Loading fasta for " << name << " ... " << flush;
+                }
+                unordered_map<string, pair<size_t, string>> fa_info = read_fasta(fa_path);
+                if (progress) {
+                    cerr << "and setting dna strings in output genome" << endl;
+                }
+                Genome* genome = out_alignment->openGenome(name);
+                assert(genome != nullptr);
+                for (auto& fi : fa_info) {
+                    Sequence* sequence = genome->getSequence(fi.first);
+                    if (sequence != nullptr) {
+                        assert(sequence->getSequenceLength() == fi.second.first);
+                        sequence->setString(fi.second.second);
+                    }
                 }
             }
-            done_set.insert(name);
         }
     }
 
@@ -451,7 +457,10 @@ void add_fasta_sequences(AlignmentConstPtr in_alignment, AlignmentPtr out_alignm
     vector<string> names = in_alignment->getChildNames(in_alignment->getRootName());
     names.push_back(in_alignment->getRootName());
     for (const string& name : names) {
-        if (!done_set.count(name)) {
+        if (!target_set.count(name)) {
+            if (progress) {
+                cerr << "[halUnclip]: Directly copying dna strings for " << name << endl;
+            };
             const Genome* in_genome = in_alignment->openGenome(name);
             Genome* out_genome = out_alignment->openGenome(name);
             for (SequenceIteratorPtr seqIt = in_genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
@@ -613,7 +622,7 @@ int main(int argc, char** argv) {
     if (progress) {
         cerr << "[halUnclip]: Adding fasta sequences" << endl;
     }    
-    add_fasta_sequences(in_alignment, out_alignment, seqfile_path);
+    add_fasta_sequences(in_alignment, out_alignment, seqfile_path, target_set, progress);
 
     if (validate) {
         if (progress) {
