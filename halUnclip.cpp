@@ -336,7 +336,9 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
 #endif
                 // copy the fragment.  note that the ancestor coordinates haven't changed
                 // any, so those coordinates can go directly
-                for (TopSegmentIteratorPtr frag_top = in_sequence_frag->getTopSegmentIterator(); !frag_top->atEnd(); frag_top->toRight()) {
+                TopSegmentIteratorPtr frag_top = in_sequence_frag->getTopSegmentIterator();
+                size_t frag_top_count = in_sequence_frag->getNumTopSegments();
+                for (size_t frag_top_i = 0; frag_top_i < frag_top_count; ++frag_top_i) {
                     ts = out_top->tseg();
                     ts->setCoordinates(out_start + cur_pos, frag_top->tseg()->getLength());
                     ts->setParentIndex(frag_top->tseg()->getParentIndex());
@@ -361,7 +363,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
 #endif
                     cur_pos += ts->getLength();
 #ifdef debug
-                    cerr << " after adding frag " << j << " cur_pos=" << cur_pos << endl;
+                    cerr << " after adding frag_ts " << frag_top_i << " cur_pos=" << cur_pos << endl;
 #endif
                     frag_top->toRight();
                     out_top->toRight();
@@ -392,8 +394,8 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
                     cerr << "     " << in_sequence_frag->getName() << " len=" << in_sequence_frag->getSequenceLength() << endl;                    
                 }
             }
-            assert(cur_pos == (int64_t)out_sequence->getSequenceLength());
-
+            assert(cur_pos == (int64_t)out_sequence->getSequenceLength());            
+            assert(out_top->getArrayIndex() == out_sequence->getTopSegmentIterator()->getArrayIndex() + (int64_t)out_sequence->getNumTopSegments());
         }
 
         //pass 3: set the paralogy indexes
