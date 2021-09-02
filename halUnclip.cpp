@@ -405,22 +405,27 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
             }
         }
 
-        //pass 4: fix up the bottom segmments, as the top segments array indexes they point to may have changed
-        if (progress) {
-            cerr << " [pass 4]" << endl;                
-        }
-        BottomSegment* bs;
-        for (out_botit = out_root_genome->getBottomSegmentIterator(); !out_botit->atEnd(); out_botit->toRight()) {
-            bs = out_botit->bseg();
-            hal_index_t ci = bs->getChildIndex(out_child_no);
-            if (ci != NULL_INDEX) {
-                assert(old_to_new_tsai[ci] != NULL_INDEX);
-                bs->setChildIndex(out_child_no, old_to_new_tsai[ci]);
-            }
-        }
-        
         in_alignment->closeGenome(in_genome);
         out_alignment->closeGenome(out_genome);
+
+        //pass 4: fix up the bottom segmments, as the top segments array indexes they point to may have changed
+        if (progress) {
+            cerr << " [pass 4]" << flush;  
+        }
+        out_botit = out_root_genome->getBottomSegmentIterator();
+        for (size_t i = 0; i < num_bottom; ++i) {
+            BottomSegment* out_bs = out_botit->bseg();
+            hal_index_t ci = out_bs->getChildIndex(out_child_no);
+            if (ci != NULL_INDEX) {
+                assert(old_to_new_tsai[ci] != NULL_INDEX);
+                out_bs->setChildIndex(out_child_no, old_to_new_tsai[ci]);
+            }
+            out_botit->toRight();
+        }
+        
+        if (progress) {
+            cerr << " [done]" << endl;
+        }        
     }
 }
 
