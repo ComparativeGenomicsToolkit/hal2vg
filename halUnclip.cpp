@@ -184,8 +184,8 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
             // sort the fragments by start position
             map<size_t, const Sequence*> start_to_frag;
             for (const Sequence* frag : frags) {
-                int64_t start;
-                string parsed_name = parse_subpath_name(frag->getName(), &start);
+                int64_t start = -1;
+                string parsed_name = target_set.count(name) ? parse_subpath_name(frag->getName(), &start) : frag->getName();
                 if (start == -1) {
                     start = 0;
                     assert(frags.size() == 1);
@@ -238,14 +238,17 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
     BottomSegmentIteratorPtr out_botit = out_root_genome->getBottomSegmentIterator();
     assert(in_root_genome->getNumBottomSegments() == out_root_genome->getNumBottomSegments());
     assert(in_root_genome->getNumChildren() == out_root_genome->getNumChildren());
-    for (size_t i = 0; i < in_root_genome->getNumBottomSegments(); ++i) {
-        out_botit->bseg()->setCoordinates(in_botit->bseg()->getStartPosition(), in_botit->bseg()->getLength());
+    size_t num_bottom = in_root_genome->getNumBottomSegments();
+    size_t num_children = in_root_genome->getNumChildren();
+    for (size_t i = 0; i < num_bottom; ++i) {
+        BottomSegment* bs = out_botit->bseg();
+        bs->setCoordinates(in_botit->bseg()->getStartPosition(), in_botit->bseg()->getLength());
         // don't set child indexes, they will get done in both directions by the leaves.
-        for (size_t j = 0; j < in_root_genome->getNumChildren(); ++j) {
-            out_botit->bseg()->setChildIndex(j, NULL_INDEX);
-            out_botit->bseg()->setChildReversed(j, false);
+        for (size_t j = 0; j < num_children; ++j) {
+            bs->setChildIndex(j, NULL_INDEX);
+            bs->setChildReversed(j, false);
         }
-        out_botit->bseg()->setTopParseIndex(NULL_INDEX);
+        bs->setTopParseIndex(NULL_INDEX);
         in_botit->toRight();
         out_botit->toRight();
     }
@@ -254,7 +257,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
 
     for (const string& name : names) {
         if (progress) {
-            cerr << "[halUnclip]: Copying segments of " << name << endl;
+            cerr << "[halUnclip]: Copying segments of " << name << flush;
         }
 
         const Genome* in_genome = in_alignment->openGenome(name);
@@ -266,6 +269,9 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
         unordered_map<string, vector<const Sequence*>> frag_map;
 
         // pass 1, map all hal sequences back to their base name and check that they correspond to a fasta sequence
+        if (progress) {
+            cerr << " [pass 1]" << flush;
+        }
         for (SequenceIteratorPtr seqIt = in_genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
             const Sequence *sequence = seqIt->getSequence();
             string sequence_name = sequence->getName();
@@ -274,67 +280,88 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
         }
 
         // pass 2, copy each sequence fragment by fragment
+        if (progress) {
+            cerr << " [pass 2]" << flush;
+        }
+        unordered_map<int64_t, int64_t> paralogy_ai_map; // map input array index to output array index for all paralogy having segments
         for (auto& nf : frag_map) {
             const string& base_name = nf.first;
+            vector<const Sequence*>& frags = nf.second;
+            
+            // sort the fragments by start position
+            map<size_t, const Sequence*> start_to_frag;
+            for (const Sequence* frag : frags) {
+                int64_t start = -1;
+                string parsed_name = target_set.count(name) ? parse_subpath_name(frag->getName(), &start) : frag->getName();
+                if (start == -1) {
+                    start = 0;
+                    assert(frags.size() == 1);
+                }
+                start_to_frag[start] = frag;
+            }
+
             // the one output sequence that corresponds to the list of fragments in the input
             Sequence* out_sequence = out_genome->getSequence(base_name);
             assert(out_sequence != nullptr);
             TopSegmentIteratorPtr out_top = out_sequence->getTopSegmentIterator();
-            
-            int64_t cur_pos = 0;
-            vector<const Sequence*>& frags = nf.second;
-            for (size_t i = 0; i < frags.size(); ++i) {
-                const Sequence* in_sequence_frag = frags[i];
-                int64_t frag_start = -1;
-                if (target_set.count(name)) {
-                    parse_subpath_name(in_sequence_frag->getName(), &frag_start);
-                }
-                if (frag_start == -1) {
-                    frag_start = 0;
-                }
-                if (frag_start > cur_pos + 1) {
-                    // need to add a gap *before* this fragment                    
-                    out_top->tseg()->setCoordinates(cur_pos + out_sequence->getStartPosition(), frag_start - cur_pos);
-                    out_top->tseg()->setParentIndex(NULL_INDEX);
-                    out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
-                    out_top->tseg()->setBottomParseIndex(NULL_INDEX);
+            TopSegment* ts;
+
+            int64_t cur_pos = 0; //position in out_sequence
+            int64_t out_start = out_sequence->getStartPosition(); //offset needed when setting coorindatesin out_top
+
+            // visit the ordered input sequence fragments that correspond to out_sequence
+            for (auto i = start_to_frag.begin(); i != start_to_frag.end(); ++i) {
+                const Sequence* in_sequence_frag = i->second;
+                int64_t frag_start = i->first;
+                if (frag_start > cur_pos) {
+                    // need to add a gap *before* this fragment
+                    ts = out_top->tseg();
+                    ts->setCoordinates(cur_pos + out_start, frag_start - cur_pos);
+                    ts->setParentIndex(NULL_INDEX);
+                    ts->setNextParalogyIndex(NULL_INDEX);
+                    ts->setBottomParseIndex(NULL_INDEX);
 #ifdef debug
                     cerr << "cur_pos=" << cur_pos << flush;
 #endif
-                    cur_pos += out_top->tseg()->getLength();
+                    cur_pos += ts->getLength();
 #ifdef debug
-                    cerr << " after adding start gap cur_pos=" << cur_pos << " (frag " << i << " name=" << in_sequence_frag->getName() << " fragstart=" << frag_start << ")" << endl;
+                    cerr << " after adding start gap cur_pos=" << cur_pos << " (frag name=" << in_sequence_frag->getName() << " fragstart=" << frag_start << ")" << endl;
 #endif
                     out_top->toRight();
                 }
                 // copy the fragment.  note that the ancestor coordinates haven't changed
                 // any, so those coordinates can go directly
                 TopSegmentIteratorPtr frag_top = in_sequence_frag->getTopSegmentIterator();
-                int64_t out_top_offset = out_top->tseg()->getArrayIndex();
 #ifdef debug
                 cerr << "frag " << in_sequence_frag->getFullName() << " has " << in_sequence_frag->getNumTopSegments() << " topsegs which will map to range "
                      << out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() << " - "
                      << (out_sequence->getTopSegmentIterator()->tseg()->getArrayIndex() + in_sequence_frag->getNumTopSegments()) << endl;
 #endif
-                for (size_t j = 0; j < in_sequence_frag->getNumTopSegments(); ++j) {
-                    out_top->tseg()->setCoordinates(out_sequence->getStartPosition() + cur_pos, frag_top->tseg()->getLength());
-                    out_top->tseg()->setParentIndex(frag_top->tseg()->getParentIndex());
-                    out_top->tseg()->setParentReversed(frag_top->tseg()->getParentReversed());
+                size_t num_top = in_sequence_frag->getNumTopSegments();
+                for (size_t j = 0; j < num_top; ++j) {
+                    ts = out_top->tseg();
+                    ts->setCoordinates(out_start + cur_pos, frag_top->tseg()->getLength());
+                    ts->setParentIndex(frag_top->tseg()->getParentIndex());
+                    ts->setParentReversed(frag_top->tseg()->getParentReversed());
                     if (frag_top->tseg()->hasNextParalogy()) {
-                        out_top->tseg()->setNextParalogyIndex(frag_top->tseg()->getNextParalogyIndex() + out_top_offset);
+                        // set the bad value from input alignment, to be update later when we have map
+                        ts->setNextParalogyIndex(frag_top->tseg()->getNextParalogyIndex());
+                        paralogy_ai_map[frag_top->tseg()->getArrayIndex()] = ts->getArrayIndex();
                     } else {
-                        out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
+                        ts->setNextParalogyIndex(NULL_INDEX);
                     }
                     if (frag_top->tseg()->hasParent()) {
                         out_botit->toParent(out_top);
-                        out_botit->bseg()->setChildIndex(out_child_no, out_top->tseg()->getArrayIndex());
-                        out_botit->bseg()->setChildReversed(out_child_no, out_top->tseg()->getParentReversed());
+                        if (out_botit->bseg()->getChildIndex(out_child_no) == frag_top->tseg()->getArrayIndex()) {
+                            out_botit->bseg()->setChildIndex(out_child_no, ts->getArrayIndex());
+                            out_botit->bseg()->setChildReversed(out_child_no, ts->getParentReversed());
+                        }
                     }
-                    out_top->tseg()->setBottomParseIndex(NULL_INDEX);
+                    ts->setBottomParseIndex(NULL_INDEX);
 #ifdef debug
                     cerr << "cur_pos=" << cur_pos << flush;
 #endif
-                    cur_pos += out_top->tseg()->getLength();
+                    cur_pos += ts->getLength();
 #ifdef debug
                     cerr << " after adding frag " << j << " cur_pos=" << cur_pos << endl;
 #endif
@@ -344,14 +371,15 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
             }
             if (cur_pos < (int64_t)out_sequence->getSequenceLength()) {
                 // needto add a gap *after* the last fragment
-                out_top->tseg()->setCoordinates(out_sequence->getStartPosition() + cur_pos, (int64_t)out_sequence->getSequenceLength() - cur_pos);
-                out_top->tseg()->setParentIndex(NULL_INDEX);
-                out_top->tseg()->setNextParalogyIndex(NULL_INDEX);
-                out_top->tseg()->setBottomParseIndex(NULL_INDEX);
+                ts = out_top->tseg();
+                ts->setCoordinates(out_start + cur_pos, (int64_t)out_sequence->getSequenceLength() - cur_pos);
+                ts->setParentIndex(NULL_INDEX);
+                ts->setNextParalogyIndex(NULL_INDEX);
+                ts->setBottomParseIndex(NULL_INDEX);
 #ifdef debug
                 cerr << "cur_pos="<< cur_pos << flush;
 #endif
-                cur_pos += out_top->tseg()->getLength();
+                cur_pos += ts->getLength();
 #ifdef debug
                 cerr << " after adding end gap cur_pos=" << cur_pos << endl;
 #endif
@@ -369,6 +397,20 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
             assert(cur_pos == (int64_t)out_sequence->getSequenceLength());
 
         }
+
+        //pass 3: set the paralogy indexes
+        if (progress) {
+            cerr << " [pass 3]" << endl;
+        }
+        
+        TopSegment* ts;
+        for (TopSegmentIteratorPtr out_topit = out_genome->getTopSegmentIterator(); !out_topit->atEnd(); out_topit->toRight()) {
+            ts = out_topit->tseg();
+            if (ts->hasNextParalogy()) {
+                ts->setNextParalogyIndex(paralogy_ai_map.at(ts->getNextParalogyIndex()));
+            }
+        }
+        
         in_alignment->closeGenome(in_genome);
         out_alignment->closeGenome(out_genome);
     }
