@@ -227,34 +227,15 @@ static unordered_map<string, vector<Sequence::Info>> get_filled_dimensions(Align
 
 static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_alignment, const unordered_map<string, size_t>& seq_dims,
                           const unordered_set<string>& target_set, bool progress) {
-
-    // just copy the root
-    if (progress) {
-        cerr << "[halUnclip]: Copying root segments" << endl;
-    }
+    
     const Genome* in_root_genome = in_alignment->openGenome(in_alignment->getRootName());
     Genome* out_root_genome = out_alignment->openGenome(in_alignment->getRootName());
-    BottomSegmentIteratorPtr in_botit = in_root_genome->getBottomSegmentIterator();
-    BottomSegmentIteratorPtr out_botit = out_root_genome->getBottomSegmentIterator();
-    assert(in_root_genome->getNumBottomSegments() == out_root_genome->getNumBottomSegments());
-    assert(in_root_genome->getNumChildren() == out_root_genome->getNumChildren());
-    size_t num_bottom = in_root_genome->getNumBottomSegments();
-    size_t num_children = in_root_genome->getNumChildren();
-    for (size_t i = 0; i < num_bottom; ++i) {
-        BottomSegment* in_bs = in_botit->bseg();
-        BottomSegment* out_bs = out_botit->bseg();
-        out_bs->setCoordinates(in_bs->getStartPosition(), in_bs->getLength());
-        // note: these array indexes aren't valid in the new genome.  we will update them later
-        for (size_t j = 0; j < num_children; ++j) {
-            out_bs->setChildIndex(j, in_bs->getChildIndex(j));
-            out_bs->setChildReversed(j, in_bs->getChildReversed(j));
-        }
-        out_bs->setTopParseIndex(NULL_INDEX);
-        in_botit->toRight();
-        out_botit->toRight();
-    }
     
     vector<string> names = in_alignment->getChildNames(in_alignment->getRootName());
+    // with a lot of children, the bottom segments are unweildy.  they play havoc with default settings (chunk=1000 is too small)
+    // and are terribly slow even with tuning (except inmemory).  so we load up everything we need in this structure in memory
+    // so that the bottom segments can be set in a single pass
+    vector<vector<hal_index_t>> old_to_new_tsai_vec(names.size());
 
     for (const string& name : names) {
         if (progress) {
@@ -286,9 +267,9 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
         if (progress) {
             cerr << " [pass 2]" << flush;
         }
-        // it's too slow to set the bottom segments in this loop (because cache?)
-        // so we keep mappings in memory of each old array index to a new array index so we can update the bottom segments in one pass at end
-        vector<hal_index_t> old_to_new_tsai(in_genome->getNumTopSegments(), NULL_INDEX);
+        vector<hal_index_t>& old_to_new_tsai = old_to_new_tsai_vec[out_child_no];
+        old_to_new_tsai.resize(in_genome->getNumTopSegments(), NULL_INDEX);
+    
         for (auto& nf : frag_map) {
             const string& base_name = nf.first;
             vector<const Sequence*>& frags = nf.second;
@@ -395,7 +376,7 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
 
         //pass 3: set the paralogy indexes
         if (progress) {
-            cerr << " [pass 3]" << flush;
+            cerr << " [pass 3]" << endl;
         }        
         TopSegment* ts;
         for (TopSegmentIteratorPtr out_topit = out_genome->getTopSegmentIterator(); !out_topit->atEnd(); out_topit->toRight()) {
@@ -407,25 +388,32 @@ static void copy_and_fill(AlignmentConstPtr in_alignment, AlignmentPtr out_align
 
         in_alignment->closeGenome(in_genome);
         out_alignment->closeGenome(out_genome);
+    }
 
-        //pass 4: fix up the bottom segmments, as the top segments array indexes they point to may have changed
-        if (progress) {
-            cerr << " [pass 4]" << flush;  
+    // copy the root
+    if (progress) {
+        cerr << "[halUnclip]: Copying root segments" << endl;
+    }
+    BottomSegmentIteratorPtr in_botit = in_root_genome->getBottomSegmentIterator();
+    BottomSegmentIteratorPtr out_botit = out_root_genome->getBottomSegmentIterator();
+    assert(in_root_genome->getNumBottomSegments() == out_root_genome->getNumBottomSegments());
+    assert(in_root_genome->getNumChildren() == out_root_genome->getNumChildren());
+    size_t num_bottom = in_root_genome->getNumBottomSegments();
+    size_t num_children = in_root_genome->getNumChildren();
+    for (size_t i = 0; i < num_bottom; ++i) {
+        BottomSegment* in_bs = in_botit->bseg();
+        BottomSegment* out_bs = out_botit->bseg();
+        out_bs->setCoordinates(in_bs->getStartPosition(), in_bs->getLength());
+        for (size_t j = 0; j < num_children; ++j) {
+            // everything's the same except the child index, which gets mapped via old_to_new_tsai_vec
+            hal_index_t in_ci = in_bs->getChildIndex(j);
+            hal_index_t out_ci = in_ci != NULL_INDEX ? old_to_new_tsai_vec[j][in_ci] : in_ci;
+            out_bs->setChildIndex(j, out_ci);
+            out_bs->setChildReversed(j, in_bs->getChildReversed(j));
         }
-        out_botit = out_root_genome->getBottomSegmentIterator();
-        for (size_t i = 0; i < num_bottom; ++i) {
-            BottomSegment* out_bs = out_botit->bseg();
-            hal_index_t ci = out_bs->getChildIndex(out_child_no);
-            if (ci != NULL_INDEX) {
-                assert(old_to_new_tsai[ci] != NULL_INDEX);
-                out_bs->setChildIndex(out_child_no, old_to_new_tsai[ci]);
-            }
-            out_botit->toRight();
-        }
-        
-        if (progress) {
-            cerr << " [done]" << endl;
-        }        
+        out_bs->setTopParseIndex(NULL_INDEX);
+        in_botit->toRight();
+        out_botit->toRight();
     }
 }
 
