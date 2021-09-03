@@ -28,6 +28,9 @@ REL_TAG=$(getLatestReleaseTag)
 git checkout "${REL_TAG}"
 git submodule update --init --recursive
 
+# todo: update / figure out / remove hack:
+cp ./build-tools/CMakeLists.txt ./deps/libbdsg-easy/deps/libhandlegraph/CMakeLists.txt
+
 if [ $(man gcc | grep nehalem | wc -l) -ge 1 ]
 then
 	 # attempt to increase portability by using older architecture
@@ -36,5 +39,5 @@ else
 	 make check-static
 fi
 
-cp hal2vg clip-vg halRemoveDupes halMergeChroms ${buildDir}/
+cp hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip ${buildDir}/
 
