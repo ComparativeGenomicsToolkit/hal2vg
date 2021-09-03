@@ -76,11 +76,35 @@ static unordered_map<string, pair<size_t, string>> read_fasta(const string& fa_p
 
     fastaRead(fa_file, seqs, seq_lens, seq_names);
 
+    // todo: should be done once, but sonlib fasta reading so slow it odesn't matter
+    vector<unsigned char> cmap(numeric_limits<unsigned char>::max());
+    for (unsigned char i = 0; i < cmap.size(); ++i) {
+        switch (i) {
+        case 'a':
+        case 'c':
+        case 'g':
+        case 't':
+        case 'A':
+        case 'C':
+        case 'G':
+        case 'T':
+            cmap[i] = i;
+            break;
+        default:
+            cmap[i] = 'N';
+            break;
+        }
+    }
+
     unordered_map<string, pair<size_t, string>> fa_info; 
     for (int64_t i = 0; i < seqs->length; ++i) {
         string name = (char*)seq_names->list[i];
         size_t len = (size_t)listGetInt(seq_lens, i);
         string seq = (char*)seqs->list[i];
+        for (size_t j = 0; j < seq.length(); ++j) {
+            // hal doesn't like non-acgtn characters
+            seq[j] = cmap[seq[j]];
+        }
         fa_info[name] = make_pair(len, seq);
     }
 
