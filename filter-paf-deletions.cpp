@@ -40,28 +40,30 @@ static vector<string> &split_delims(const string &s, const string& delims, vecto
 static unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
                                                 const string& ref_prefix);
 static IntervalTree<int64_t, int64_t> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index);
-static void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                       const IntervalTree<int64_t, int64_t>& ref_deletions,
-                       const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
-                       double overlap_threshold, bool progress);  
+static int64_t filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
+                          const IntervalTree<int64_t, int64_t>& ref_deletions,
+                          const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
+                          double overlap_threshold, vector<bool>& filtered_lines, bool progress, bool verbose);
 
 void help(char** argv) {
     cerr << "usage: " << argv[0] << " [options] <graph.vg> <trans> <aln.paf> <reference-prefix> <threshold>\n" << endl
-       << "Use distances from graph to filter out implied deletions from PAF (cigars not considered, only blocks)" << endl
-       << "  <graph.vg> : minigraph as obtained from vg convert -g graph.gfa" << endl
-       << "  <trans> : node translation from vg convert -g -T" << endl
-       << "  <aln.paf> : paf alignment from cactus-graphmap" << endl
-       << "  <reference-prefix> : prefix of reference path(s) in graph" 
-       << endl
-       << "options: " << endl
-       << "    -p, --progress            Print progress" << endl
-       << "    -t, --threads N           number of threads to use (used only for computing snarls) [default: all available]" << endl
+         << "Use distances from graph to filter out implied deletions from PAF (cigars not considered, only blocks)" << endl
+         << "  <graph.vg> : minigraph as obtained from vg convert -g graph.gfa" << endl
+         << "  <trans> : node translation from vg convert -g -T" << endl
+         << "  <aln.paf> : paf alignment from cactus-graphmap" << endl
+         << "  <reference-prefix> : prefix of reference path(s) in graph" 
+         << endl
+         << "options: " << endl
+         << "    -p, --progress            Print progress" << endl
+         << "    -v, --verbose             Print deletions" << endl
+         << "    -t, --threads N           number of threads to use (used only for computing snarls) [default: all available]" << endl
        << endl;
 }    
 
 int main(int argc, char** argv) {
 
     bool progress = false;
+    bool verbose = false;
     // only filter deletions that don't overlap an existing deletion by at least this much
     // (doesn't seem to a factor -- most big deletions not in minigraph)
     double overlap_threshold = 0.5;
@@ -72,13 +74,14 @@ int main(int argc, char** argv) {
         static const struct option long_options[] = {
             {"help", no_argument, 0, 'h'},
             {"progress", no_argument, 0, 'p'},
+            {"verbose", no_argument, 0, 'v'},
             {"threads", required_argument, 0, 't'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpt:",
+        c = getopt_long (argc, argv, "hpvt:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -87,6 +90,9 @@ int main(int argc, char** argv) {
 
         switch (c)
         {
+        case 'v':
+            verbose = true;
+            break;
         case 'p':
             progress = true;
             break;
@@ -184,7 +190,36 @@ int main(int argc, char** argv) {
 #endif
 
     // we have everything needed to filter the paf
-    filter_paf(graph.get(), paf_file, ref_index, ref_deletions, mg_to_vg, max_deletion, overlap_threshold, progress);   
+    vector<bool> filtered_lines;
+    int64_t filtered_line_total = 0;
+    int64_t filtered_line_it = 0;
+    int64_t iteration = 0;
+    do {
+        filtered_line_it = filter_paf(graph.get(), paf_file, ref_index, ref_deletions, mg_to_vg, max_deletion,
+                                      overlap_threshold, filtered_lines, progress, verbose);
+        filtered_line_total += filtered_line_it;
+        if (progress) {
+            cerr << "[filter-paf-deletions]: Iteration " << iteration << ": Found " << filtered_line_it << " lines to filter" << endl;
+        }
+        ++iteration;
+    } while (filtered_line_it > 0);
+
+    if (progress) {
+        cerr << "[filter-paf-deletions]: Filtering out " << filtered_line_total << " paf lines" << endl;
+    }
+
+    // output the unfiltered lines
+    paf_file.clear();
+    paf_file.seekg(0, ios::beg) ;
+    string buffer;
+    for (int64_t line_no = 0; line_no < filtered_lines.size(); ++line_no) {
+        const auto& ret = getline(paf_file, buffer);
+        assert(ret);
+        if (filtered_lines[line_no] == false) {
+            cout << buffer << "\n";
+        }
+    }
+    cout << flush;
 
     return 0;
 }
@@ -198,11 +233,13 @@ static string strip_prefix(const string& name) {
     return name;
 }
 
-void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                const IntervalTree<int64_t, int64_t>& ref_deletions,
-                const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
-                double overlap_threshold, bool progress) {
+int64_t filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
+                   const IntervalTree<int64_t, int64_t>& ref_deletions,
+                   const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
+                   double overlap_threshold, vector<bool>& filtered_lines, bool progress, bool verbose) {
 
+    paf_file.clear();
+    paf_file.seekg(0, ios::beg) ;
     string buffer;
 
     unordered_set<string> query_set;
@@ -219,7 +256,15 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
     unordered_set<int64_t> cut_blocks; // offsets in above that mark block before max_deletion
 
     size_t line_no = 0;
+    size_t unfiltered_line_no = 0;
     while (getline(paf_file, buffer)) {
+        if (unfiltered_line_no >= filtered_lines.size()) {
+            // first pass
+            filtered_lines.push_back(false);
+        } else if (filtered_lines[unfiltered_line_no]) {
+            ++unfiltered_line_no;
+            continue;
+        }
         vector<string> toks;
         split_delims(buffer, "\t\n", toks);
 
@@ -270,7 +315,7 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
             }
 
             if (delta > max_deletion && ((double)ref_overlap_size / delta < overlap_threshold)) {
-                if (progress) {
+                if (verbose) {
                     cerr << "[filter-paf-deletions]: detected deletion of size " << delta << " with overlap " << ref_overlap_size <<
                         " on following paf line:"
                          << " \n  " << buffer << endl;
@@ -296,6 +341,7 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
         prev_ref_end = ref_end;
         
         ++line_no;
+        ++unfiltered_line_no;
     }
 
     // second pass to do filtering now that we have block sizes
@@ -305,7 +351,12 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
     size_t filtered_line_count = 0;
         
     line_no = 0;
+    unfiltered_line_no = 0;
     while (getline(paf_file, buffer)) {
+        if (filtered_lines[unfiltered_line_no]) {
+            ++unfiltered_line_no;
+            continue;
+        }
 
         bool filter_out = false;        
         int64_t cur_block = line_to_block[line_no];
@@ -322,16 +373,15 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
             }
         }
 
-        if (!filter_out) {
-            cout << buffer << "\n";
-        } else {
+        if (filter_out) {
+            filtered_lines[unfiltered_line_no] = true;
             ++filtered_line_count;
         }
+        ++unfiltered_line_no;
         ++line_no;
     }
-    if (progress) {
-        cerr << "[filter-paf-deletions]: Filtered " << filtered_line_count << " paf lines" << endl;
-    }
+
+    return filtered_line_count;
 }
 
 unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
