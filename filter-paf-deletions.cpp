@@ -38,7 +38,7 @@ static vector<string> &split_delims(const string &s, const string& delims, vecto
 static unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
                                                 const string& ref_prefix);
 static void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                       const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion);  
+                       const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion, bool progress);  
 
 void help(char** argv) {
     cerr << "usage: " << argv[0] << " [options] <graph.vg> <trans> <aln.paf> <reference-prefix> <threshold>\n" << endl
@@ -146,6 +146,10 @@ int main(int argc, char** argv) {
     unordered_map<nid_t, string> vg_to_mg;
     std::tie(mg_to_vg, vg_to_mg) = load_trans(trans_path);
 
+    if (progress) {
+        cerr << "[filter-paf-deletions]: Loaded " << mg_to_vg.size() << " translations." << endl;
+    }
+
     // open the paf
     ifstream paf_file(paf_path);
     if (!paf_file) {
@@ -157,6 +161,10 @@ int main(int argc, char** argv) {
     // this maps each node in the graph to a (maximal) reference interval
     unordered_map<nid_t, Anchor> ref_index = index_graph(graph.get(), ref_prefix);
 
+    if (progress) {
+        cerr << "[filter-paf-deletions]: Created reference path index" << endl;
+    }
+
 #ifdef debug
     for (auto fam : ref_index) {
         cerr << fam.first << " -> " << graph->get_path_name(fam.second.path_handle) << " " << fam.second.min_offset << " " << fam.second.max_offset << endl;
@@ -164,7 +172,7 @@ int main(int argc, char** argv) {
 #endif
 
     // we have everything needed to filter the paf
-    filter_paf(graph.get(), paf_file, ref_index, mg_to_vg, max_deletion);   
+    filter_paf(graph.get(), paf_file, ref_index, mg_to_vg, max_deletion, progress);   
 
     return 0;
 }
@@ -179,7 +187,7 @@ static string strip_prefix(const string& name) {
 }
 
 void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion) {
+                const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion, bool progress) {
 
     string buffer;
 
@@ -189,8 +197,14 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
     int64_t prev_query_end;
     nid_t prev_target_id = 0;
     int64_t prev_ref_start;
-    int64_t prev_ref_end;    
-    
+    int64_t prev_ref_end;
+
+    // store matches in current block (run of mappings from same query that don't span a max_deletion)
+    vector<int64_t> line_to_block; // map paf line number to a block (this vector contains offsets to below vector)
+    vector<int64_t> blocks;
+    unordered_set<int64_t> cut_blocks; // offsets in above that mark block before max_deletion
+
+    size_t line_no = 0;
     while (getline(paf_file, buffer)) {
         vector<string> toks;
         split_delims(buffer, "\t\n", toks);
@@ -203,6 +217,7 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
         int64_t target_length = stol(toks[6]);
         int64_t target_start = stol(toks[7]);
         int64_t target_end = stol(toks[8]);
+        int64_t matches = stol(toks[9]);
 
         // map the target interval onto the reference path
         if (!mg_to_vg.count(target_name)) {
@@ -219,24 +234,34 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
         cerr << "ref start = " << anchor.min_offset  << " + " << target_start << "   ref_end = " << anchor.max_offset << " - ("
              << target_length << " - " << target_end << ");" << endl;
 #endif
+        bool continues_block = query_name == prev_query_name;
+        if (continues_block) {
 
-        if (prev_query_name == query_name) {
+            if (prev_query_start > query_start) {
+                cerr << "Input paf not in order.  Sort with \"sort -k 1,1 -k 3,3n\" first.  Offending line:\n" << buffer << endl;
+                exit(1);
+            }
             int64_t query_delta = query_start - prev_query_end;
             int64_t ref_delta = ref_start - prev_ref_end;
             int64_t delta = ref_delta - query_delta;
 
-            if (delta > max_deletion && false) {
-                cerr << "detected deletion of " << delta << " on following paf line"
-                     << " derive prev query " << prev_query_start  << "," << prev_query_end
-                     << " prev target " << prev_ref_start << "," << prev_ref_end
-                     << "   query " << query_start  << "," << query_end
-                     << " target " << ref_start << "," << ref_end
-                    
-                     << " \n" << buffer << endl;
+            if (delta > max_deletion) {
+                if (progress) {
+                    cerr << "[filter-paf-deletions]: detected deletion of size " << delta << " on following paf line:"
+                         << " \n  " << buffer << endl;
+                }
+                continues_block = false;
+                cut_blocks.insert(blocks.size() - 1);
             }
-
-            cerr << ref_start << "\t" << ref_end << "\t" << delta << "\t" << buffer << endl;
         }
+
+        // update the current block may adding the matches (or assigng a new block if necessary)
+        if (!continues_block) {
+            blocks.push_back(0);
+        }
+        assert(!blocks.empty());
+        blocks.back() += matches;
+        line_to_block.push_back(blocks.size() - 1);
 
         prev_query_name = query_name;
         prev_query_start = query_start;
@@ -244,8 +269,44 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
         prev_target_id = target_id;
         prev_ref_start = ref_start;
         prev_ref_end = ref_end;
-    }
         
+        ++line_no;
+    }
+
+    // second pass to do filtering now that we have block sizes
+    paf_file.clear();
+    paf_file.seekg(0, ios::beg) ;
+
+    size_t filtered_line_count = 0;
+        
+    line_no = 0;
+    while (getline(paf_file, buffer)) {
+
+        bool filter_out = false;        
+        int64_t cur_block = line_to_block[line_no];
+        if (cur_block > 0) {
+            int64_t prev_block = cur_block - 1;
+            if (cut_blocks.count(prev_block) && blocks[prev_block] >= blocks[cur_block]) {
+                filter_out = true;
+            }
+        }
+        if (!filter_out && cur_block < blocks.size() - 1) {
+            int64_t next_block = cur_block + 1;
+            if (cut_blocks.count(cur_block) && blocks[next_block] > blocks[cur_block]) {
+                filter_out =true;
+            }
+        }
+
+        if (!filter_out) {
+            cout << buffer << "\n";
+        } else {
+            ++filtered_line_count;
+        }
+        ++line_no;
+    }
+    if (progress) {
+        cerr << "[filter-paf-deletions]: Filtered " << filtered_line_count << " paf lines" << endl;
+    }
 }
 
 unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
