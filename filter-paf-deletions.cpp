@@ -46,14 +46,15 @@ static int64_t filter_paf(const PathHandleGraph* graph, ifstream& paf_file, cons
                           double overlap_threshold, vector<bool>& filtered_lines, bool progress, bool verbose);
 
 void help(char** argv) {
-    cerr << "usage: " << argv[0] << " [options] <graph.vg> <trans> <aln.paf> <reference-prefix> <threshold>\n" << endl
+    cerr << "usage: " << argv[0] << " [options] <graph.vg> <trans> <aln.paf> <threshold>\n" << endl
          << "Use distances from graph to filter out implied deletions from PAF (cigars not considered, only blocks)" << endl
          << "  <graph.vg> : minigraph as obtained from vg convert -g graph.gfa" << endl
          << "  <trans> : node translation from vg convert -g -T" << endl
          << "  <aln.paf> : paf alignment from cactus-graphmap" << endl
-         << "  <reference-prefix> : prefix of reference path(s) in graph" 
+         << "  <threshold> : only remove deletions greater than this" << endl
          << endl
          << "options: " << endl
+         << "    -r, --ref-prefix STR      Only consider paths whose names start with STR" << endl
          << "    -p, --progress            Print progress" << endl
          << "    -v, --verbose             Print deletions" << endl
          << "    -t, --threads N           number of threads to use (used only for computing snarls) [default: all available]" << endl
@@ -62,6 +63,7 @@ void help(char** argv) {
 
 int main(int argc, char** argv) {
 
+    string ref_prefix;
     bool progress = false;
     bool verbose = false;
     // only filter deletions that don't overlap an existing deletion by at least this much
@@ -72,6 +74,7 @@ int main(int argc, char** argv) {
     while (true) {
 
         static const struct option long_options[] = {
+            {"ref-prefix", required_argument, 0, 'r'},
             {"help", no_argument, 0, 'h'},
             {"progress", no_argument, 0, 'p'},
             {"verbose", no_argument, 0, 'v'},
@@ -90,6 +93,9 @@ int main(int argc, char** argv) {
 
         switch (c)
         {
+        case 'r':
+            ref_prefix = optarg;
+            break;
         case 'v':
             verbose = true;
             break;
@@ -117,7 +123,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (argc <= 5) {
+    if (argc <= 4) {
         cerr << "[filter-paf-deletions] error: too few arguments\n" << endl;
         help(argv);
         return 1;
@@ -130,7 +136,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (optind != argc - 5) {
+    if (optind != argc - 4) {
         cerr << "[filter-paf-deletions] error: too many arguments\n" << endl;
         help(argv);
         return 1;
@@ -139,7 +145,6 @@ int main(int argc, char** argv) {
     string graph_path = argv[optind++];
     string trans_path = argv[optind++];
     string paf_path = argv[optind++];
-    string ref_prefix = argv[optind++];
     int64_t max_deletion = stol(argv[optind++]);
 
     // load the graph
