@@ -22,6 +22,8 @@
 #include "bdsg/hash_graph.hpp"
 #include "bdsg/odgi.hpp"
 
+#include "IntervalTree.h"
+
 using namespace std;
 using namespace handlegraph;
 using namespace bdsg;
@@ -37,8 +39,11 @@ static pair<unordered_map<string, nid_t>, unordered_map<nid_t, string>> load_tra
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
                                                 const string& ref_prefix);
+static IntervalTree<int64_t, int64_t> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index);
 static void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                       const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion, bool progress);  
+                       const IntervalTree<int64_t, int64_t>& ref_deletions,
+                       const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
+                       double overlap_threshold, bool progress);  
 
 void help(char** argv) {
     cerr << "usage: " << argv[0] << " [options] <graph.vg> <trans> <aln.paf> <reference-prefix> <threshold>\n" << endl
@@ -57,6 +62,9 @@ void help(char** argv) {
 int main(int argc, char** argv) {
 
     bool progress = false;
+    // only filter deletions that don't overlap an existing deletion by at least this much
+    // (doesn't seem to a factor -- most big deletions not in minigraph)
+    double overlap_threshold = 0.5;
     int c;
     optind = 1; 
     while (true) {
@@ -160,9 +168,13 @@ int main(int argc, char** argv) {
     // index the minigraph
     // this maps each node in the graph to a (maximal) reference interval
     unordered_map<nid_t, Anchor> ref_index = index_graph(graph.get(), ref_prefix);
-
     if (progress) {
         cerr << "[filter-paf-deletions]: Created reference path index" << endl;
+    }
+
+    IntervalTree<int64_t, int64_t> ref_deletions = index_deletions(graph.get(), ref_index);
+    if (progress) {
+        cerr << "[filter-paf-deletions]: Created reference deletion index" << endl;
     }
 
 #ifdef debug
@@ -172,7 +184,7 @@ int main(int argc, char** argv) {
 #endif
 
     // we have everything needed to filter the paf
-    filter_paf(graph.get(), paf_file, ref_index, mg_to_vg, max_deletion, progress);   
+    filter_paf(graph.get(), paf_file, ref_index, ref_deletions, mg_to_vg, max_deletion, overlap_threshold, progress);   
 
     return 0;
 }
@@ -187,7 +199,9 @@ static string strip_prefix(const string& name) {
 }
 
 void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion, bool progress) {
+                const IntervalTree<int64_t, int64_t>& ref_deletions,
+                const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
+                double overlap_threshold, bool progress) {
 
     string buffer;
 
@@ -245,9 +259,20 @@ void filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordere
             int64_t ref_delta = ref_start - prev_ref_end;
             int64_t delta = ref_delta - query_delta;
 
-            if (delta > max_deletion) {
+            int64_t ref_overlap_size = 0;
+            if (delta > 1) {
+                vector<Interval<int64_t, int64_t>> overlaps = ref_deletions.findOverlapping(prev_query_end, query_start);
+                for (const auto& overlap : overlaps) {
+                    int64_t intersection_start = max(prev_query_end, overlap.start);
+                    int64_t intersection_stop = min(query_start, overlap.stop);
+                    ref_overlap_size = max(ref_overlap_size, intersection_stop - intersection_start);
+                }
+            }
+
+            if (delta > max_deletion && ((double)ref_overlap_size / delta < overlap_threshold)) {
                 if (progress) {
-                    cerr << "[filter-paf-deletions]: detected deletion of size " << delta << " on following paf line:"
+                    cerr << "[filter-paf-deletions]: detected deletion of size " << delta << " with overlap " << ref_overlap_size <<
+                        " on following paf line:"
                          << " \n  " << buffer << endl;
                 }
                 continues_block = false;
@@ -405,6 +430,38 @@ unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
     return thread_results[0];
 }
     
+IntervalTree<int64_t, int64_t> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index) {
+
+    vector<vector<Interval<int64_t, int64_t>>> thread_deletions(get_thread_count());
+
+    // get approximate deletion intervals using the index
+    graph->for_each_edge([&](edge_t edge) {
+            const Anchor& a1 = index.at(graph->get_id(edge.first));
+            const Anchor& a2 = index.at(graph->get_id(edge.second));
+            Interval<int64_t, int64_t> interval(0, 0, 0);
+            if (a1.min_offset < a2.min_offset) {
+                interval.start = a1.max_offset;
+                interval.stop = a2.min_offset;
+            } else {
+                interval.start = a2.max_offset;
+                interval.stop = a1.min_offset;                
+            }
+            interval.value = interval.stop - interval.start;
+            if (interval.value > 1) {
+                thread_deletions[omp_get_thread_num()].push_back(interval);
+            }            
+        }, true);
+
+    for (size_t i = 1; i < thread_deletions.size(); ++i) {
+        for (const auto& interval : thread_deletions[i]) {
+            thread_deletions[0].push_back(interval);
+        }
+        thread_deletions[i].clear();
+    }
+    IntervalTree<int64_t, int64_t> tree(thread_deletions[0]);
+    return tree;
+}
+
 
 pair<unordered_map<string, nid_t>, unordered_map<nid_t, string>> load_trans(const string& trans_path) {
     ifstream trans_file(trans_path);
