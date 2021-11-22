@@ -305,9 +305,12 @@ int64_t filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unord
                 cerr << "Input paf not in order.  Sort with \"sort -k 1,1 -k 3,3n\" first.  Offending line:\n" << buffer << endl;
                 exit(1);
             }
-            int64_t query_delta = query_start - prev_query_end;
-            int64_t ref_delta = ref_start - prev_ref_end;
-            int64_t delta = ref_delta - query_delta;
+            int64_t query_delta = abs(query_start - prev_query_end);
+            int64_t ref_delta = abs(ref_start - prev_ref_end);
+            int64_t delta = abs(ref_delta - query_delta);
+#ifdef debug
+            cerr << "query delta " << query_delta << " ref delta = " << ref_delta << " delta = " << delta << endl;
+#endif
 
             int64_t ref_overlap_size = 0;
             if (delta > 1) {
