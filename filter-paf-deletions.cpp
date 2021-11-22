@@ -314,7 +314,7 @@ int64_t filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unord
 
             int64_t ref_overlap_size = 0;
             if (delta > 1) {
-                vector<Interval<int64_t, int64_t>> overlaps = ref_deletions.findOverlapping(prev_query_end, query_start);
+                vector<Interval<int64_t, int64_t>> overlaps = ref_deletions.findOverlapping(min(prev_query_end, query_start), max(prev_query_end, query_start));
                 for (const auto& overlap : overlaps) {
                     int64_t intersection_start = max(prev_query_end, overlap.start);
                     int64_t intersection_stop = min(query_start, overlap.stop);
