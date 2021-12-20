@@ -768,11 +768,25 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                         if (graph->get_is_reverse(handle)) {
                             handle_t flipped_handle = graph->create_handle(graph->get_sequence(handle));
 			    graph->follow_edges(handle, true, [&](handle_t prev_handle) {
-				graph->create_edge(prev_handle, flipped_handle);
+                                    if (graph->get_id(prev_handle) != graph->get_id(handle)) {
+                                        graph->create_edge(prev_handle, flipped_handle);
+                                    }
 			      });
 			    graph->follow_edges(handle, false, [&](handle_t next_handle) {
-				graph->create_edge(flipped_handle, next_handle);
+                                    if (graph->get_id(handle) != graph->get_id(next_handle)) {
+                                        graph->create_edge(flipped_handle, next_handle);
+                                    }
 			      });
+                            // self-loop cases we punted on above:
+                            if (graph->has_edge(handle, handle)) {
+                                graph->create_edge(flipped_handle, flipped_handle);
+                            }
+                            if (graph->has_edge(handle, graph->flip(handle))) {
+                                graph->create_edge(flipped_handle, graph->flip(flipped_handle));                                
+                            }
+                            if (graph->has_edge(graph->flip(handle), handle)) {
+                                graph->create_edge(graph->flip(flipped_handle), flipped_handle);
+                            }
                             vector<step_handle_t> steps = graph->steps_of_handle(handle);
                             size_t ref_count = 0;
                             for (step_handle_t step : steps) {

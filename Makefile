@@ -2,7 +2,7 @@
 rootPath = ./
 include ./include.mk
 
-all : hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip
+all : hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip filter-paf-deletions
 
 # Note: hdf5 from apt doesn't seem to work for static builds.  It should be installed
 # from source and configured with "--enable-static --disable-shared", then have its
@@ -38,12 +38,18 @@ ifeq ($(shell ldd halUnclip | grep "not a dynamic" | wc -l), $(shell ls halUncli
 else
 	$(error ldd found dnymaic linked dependency in halUnclip)
 endif
+ifeq ($(shell ldd filter-paf-deletions | grep "not a dynamic" | wc -l), $(shell ls filter-paf-deletions | wc -l))
+	$(info ldd verified that filter-paf-deletions static)
+else
+	$(error ldd found dnymaic linked dependency in filter-paf-deletions)
+endif
+
 
 cleanFast : 
-	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o filter-paf-deletions filter-paf-deletions.o
 
 clean :
-	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o filter-paf-deletions filter-paf-deletions.o
 	cd deps/sonLib && make clean
 	cd deps/pinchesAndCacti && make clean
 	cd deps/hal && make clean
@@ -90,6 +96,12 @@ halUnclip.o : halUnclip.cpp subpaths.h ${basicLibsDependencies}
 
 halUnclip : halUnclip.o ${basicLibsDependencies} 
 	${cpp} ${CXXFLAGS} -fopenmp -pthread halUnclip.o  ${basicLibs}  -o halUnclip
+
+filter-paf-deletions.o : filter-paf-deletions.cpp subpaths.h ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -I . filter-paf-deletions.cpp -c
+
+filter-paf-deletions : filter-paf-deletions.o ${basicLibsDependencies} 
+	${cpp} ${CXXFLAGS} -fopenmp -pthread filter-paf-deletions.o  ${basicLibs}  -o filter-paf-deletions
 
 test :
 	make
