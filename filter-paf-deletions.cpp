@@ -23,6 +23,7 @@
 #include "bdsg/odgi.hpp"
 
 #include "IntervalTree.h"
+#include "paf.hpp"
 
 using namespace std;
 using namespace handlegraph;
@@ -36,14 +37,13 @@ struct Anchor {
 
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
 static pair<unordered_map<string, nid_t>, unordered_map<nid_t, string>> load_trans(const string& trans_path);
-static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
                                                 const string& ref_prefix);
-static IntervalTree<int64_t, int64_t> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index);
-static int64_t filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                          const IntervalTree<int64_t, int64_t>& ref_deletions,
-                          const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
-                          double overlap_threshold, vector<bool>& filtered_lines, bool progress, bool verbose);
+static unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index);
+static vector<PafLine> load_paf(ifstream& paf_file);
+static int64_t for_each_query_block(const vector<PafLine>& paf_lines, const vector<bool>& masking,
+                                    function<void(int64_t, int64_t)> visit_block);
+                                    
 
 void help(char** argv) {
     cerr << "usage: " << argv[0] << " [options] <graph.vg> <trans> <aln.paf> <threshold>\n" << endl
@@ -51,13 +51,14 @@ void help(char** argv) {
          << "  <graph.vg> : minigraph as obtained from vg convert -g graph.gfa" << endl
          << "  <trans> : node translation from vg convert -g -T" << endl
          << "  <aln.paf> : paf alignment from cactus-graphmap" << endl
-         << "  <threshold> : only remove deletions greater than this" << endl
+         << "  <threshold> : only remove deletions greater than this. if < 1, then interpreted as fraction of reference path size" << endl
          << endl
          << "options: " << endl
          << "    -r, --ref-prefix STR      Only consider paths whose names start with STR" << endl
          << "    -p, --progress            Print progress" << endl
+         << "    -o, --filter-off-ref      Filter mappings that aren't in dominant ref" << endl        
          << "    -v, --verbose             Print deletions" << endl
-         << "    -t, --threads N           number of threads to use (used only for computing snarls) [default: all available]" << endl
+         << "    -t, --threads N           number of threads to use (used only for indexing graph) [default: all available]" << endl
        << endl;
 }    
 
@@ -66,6 +67,7 @@ int main(int argc, char** argv) {
     string ref_prefix;
     bool progress = false;
     bool verbose = false;
+    bool keep_off_ref = true;
     // only filter deletions that don't overlap an existing deletion by at least this much
     // (doesn't seem to a factor -- most big deletions not in minigraph)
     double overlap_threshold = 0.5;
@@ -75,7 +77,8 @@ int main(int argc, char** argv) {
 
         static const struct option long_options[] = {
             {"ref-prefix", required_argument, 0, 'r'},
-            {"help", no_argument, 0, 'h'},
+            {"filter-off-ref", no_argument, 0, 'o'},
+            {"help", no_argument, 0, 'h'},            
             {"progress", no_argument, 0, 'p'},
             {"verbose", no_argument, 0, 'v'},
             {"threads", required_argument, 0, 't'},
@@ -84,7 +87,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpvt:",
+        c = getopt_long (argc, argv, "rkhpvt:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -95,6 +98,9 @@ int main(int argc, char** argv) {
         {
         case 'r':
             ref_prefix = optarg;
+            break;
+        case 'o':
+            keep_off_ref = false;
             break;
         case 'v':
             verbose = true;
@@ -145,7 +151,7 @@ int main(int argc, char** argv) {
     string graph_path = argv[optind++];
     string trans_path = argv[optind++];
     string paf_path = argv[optind++];
-    int64_t max_deletion = stol(argv[optind++]);
+    double max_deletion = stof(argv[optind++]);
 
     // load the graph
     ifstream graph_stream(graph_path);
@@ -176,6 +182,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // load the paf into memory
+    vector<PafLine> paf_lines = load_paf(paf_file);
+    if (progress) {
+        cerr << "[filter-paf-deletions]: Loaded " << paf_lines.size() << " paf lines" << endl;
+    }
+
     // index the minigraph
     // this maps each node in the graph to a (maximal) reference interval
     unordered_map<nid_t, Anchor> ref_index = index_graph(graph.get(), ref_prefix);
@@ -183,7 +195,21 @@ int main(int argc, char** argv) {
         cerr << "[filter-paf-deletions]: Created reference path index" << endl;
     }
 
-    IntervalTree<int64_t, int64_t> ref_deletions = index_deletions(graph.get(), ref_index);
+    unordered_map<path_handle_t, int64_t> ref_path_to_length;
+    if (max_deletion < 1) {
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
+                int64_t len = 0;
+                graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                        len += graph->get_length(graph->get_handle_of_step(step_handle));
+                    });
+                ref_path_to_length[path_handle] = len;
+            });
+        if (progress) {
+            cerr << "[filter-paf-deletions]: Computed lengths for " << ref_path_to_length.size() << " reference paths" << endl;
+        }
+    }
+
+    unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>> ref_deletions = index_deletions(graph.get(), ref_index);
     if (progress) {
         cerr << "[filter-paf-deletions]: Created reference deletion index" << endl;
     }
@@ -195,22 +221,197 @@ int main(int argc, char** argv) {
 #endif
 
     // we have everything needed to filter the paf
-    vector<bool> filtered_lines;
+    vector<bool> filtered_lines(paf_lines.size(), false);
     int64_t filtered_line_total = 0;
     int64_t filtered_line_it = 0;
+    int64_t filtered_match_total = 0;
     int64_t iteration = 0;
+
     do {
-        filtered_line_it = filter_paf(graph.get(), paf_file, ref_index, ref_deletions, mg_to_vg, max_deletion,
-                                      overlap_threshold, filtered_lines, progress, verbose);
-        filtered_line_total += filtered_line_it;
+        filtered_line_it = 0;
+        for_each_query_block(paf_lines, filtered_lines, [&](int64_t block_start, int64_t block_end) {
+                assert(!filtered_lines[block_start] && !filtered_lines[block_end]);
+                // get some stats about the block
+                unordered_map<path_handle_t, int64_t> ref_path_sizes;
+                int64_t total_matches = 0;
+                for (int64_t i = block_start; i <= block_end; ++i) {
+                    if (!filtered_lines[i]) {
+                        const PafLine& paf = paf_lines[i];
+                        nid_t target_id = mg_to_vg.at(paf.target_name);
+                        const Anchor& anchor = ref_index.at(target_id);
+                        ref_path_sizes[anchor.path_handle] += paf.num_matching;
+                        total_matches += paf.num_matching;
+                    } else {
+                        assert(iteration > 0);
+                    }
+                }
+                if (total_matches == 0) {
+                    // whole block was filtered, nothing to be done
+                    return;
+                }
+                // find the number one reference path by match coverage
+                // todo: what about tie?
+                path_handle_t ref_path;
+                int64_t ref_path_size = -1;
+                for (const auto& rps : ref_path_sizes) {
+                    if (rps.second > ref_path_size) {
+                        ref_path_size = rps.second;
+                        ref_path = rps.first;
+                    }
+                }
+
+                // mask out everything off this path
+                if (!keep_off_ref) {
+                    // get rid of all off-reference path mappings right away
+                    int64_t off_ref_total = 0;
+                    int64_t off_ref_match_total = 0;
+                    for (int64_t i = block_start; i <= block_end; ++i) {
+                        if (!filtered_lines[i]) {
+                            nid_t cur_target_id = mg_to_vg.at(paf_lines[i].target_name);
+                            const Anchor& cur_anchor = ref_index.at(cur_target_id);
+                            if (cur_anchor.path_handle != ref_path) {
+                                filtered_lines[i] = true;
+                                ++off_ref_total;
+                                off_ref_match_total += paf_lines[i].num_matching;
+                            }
+                        }
+                    }
+                    filtered_line_it += off_ref_total;
+                    filtered_line_total += off_ref_total;
+                    filtered_match_total += off_ref_match_total;
+                    if (verbose && off_ref_total > 0) {
+                        cerr << "[filter-paf-deletions]: filtered " << off_ref_total << " lines with " << off_ref_match_total << " bases "
+                             << " because they did not map to reference sequence " << graph->get_path_name(ref_path) << " all in block "
+                                 << "\n  I=" << block_start <<": " << paf_lines[block_start]
+                                 << "\n  J=" << block_end << ": " << paf_lines[block_end] << endl << endl;
+                    }
+                }
+
+                // try to find a gap that exceeds the length
+                int64_t prev_idx = -1;
+                vector<int64_t> cut_points = {block_start};
+                for (int64_t i = block_start; i <= block_end; ++i) {
+                    if (filtered_lines[i]) {
+                        continue;
+                    }
+                    nid_t cur_target_id = mg_to_vg.at(paf_lines[i].target_name);
+                    const Anchor& cur_anchor = ref_index.at(cur_target_id);
+                    if (cur_anchor.path_handle != ref_path) {
+                        // if the target's not on our path, there's not much we can do but ignore it
+                        continue;
+                    }                    
+                    if (prev_idx == -1) {
+                        prev_idx = i;
+                        continue;
+                    }
+                    // if we got this far that means we're on the path and we have a prev on the path too
+                    // do a rough delta check
+                    assert(prev_idx < i);
+                    const PafLine& cur_paf = paf_lines[i];
+                    const PafLine& prev_paf = paf_lines[prev_idx];
+                    int64_t query_delta = cur_paf.query_start - prev_paf.query_end; // not abs because sorted
+
+                    nid_t prev_target_id = mg_to_vg.at(prev_paf.target_name);
+                    const Anchor& prev_anchor = ref_index.at(prev_target_id);
+                    
+                    // todo : verify 
+                    int64_t cur_ref_start = cur_anchor.min_offset + cur_paf.target_start;
+                    int64_t cur_ref_end = cur_anchor.max_offset - (cur_paf.target_len - cur_paf.target_end);
+                    int64_t prev_ref_start = prev_anchor.min_offset + prev_paf.target_start;
+                    int64_t prev_ref_end = prev_anchor.max_offset - (prev_paf.target_len - prev_paf.target_end);
+
+                    // sort the ref intervales
+                    if (cur_ref_start < prev_ref_start) {
+                        swap(cur_ref_start, prev_ref_start);
+                        swap(cur_ref_end, prev_ref_end);
+                    }
+                    int64_t ref_delta = cur_ref_start - prev_ref_end;
+                                    
+                    int64_t delta = ref_delta > 0 ? abs(ref_delta - query_delta) : -1;
+
+                    int64_t ref_overlap_size = 0;
+                    if (delta > 0) {                     
+                        if (ref_deletions.count(ref_path)) {
+                            vector<Interval<int64_t, int64_t>> overlaps = ref_deletions.at(ref_path).findOverlapping(prev_ref_end, cur_ref_start);
+                            for (const auto& overlap : overlaps) {
+                                int64_t intersection_start = max(prev_ref_end, overlap.start);
+                                int64_t intersection_stop = min(cur_ref_start, overlap.stop);
+                                ref_overlap_size = max(ref_overlap_size, intersection_stop - intersection_start);                                
+                            }
+                        }
+                    }
+                    int64_t max_deletion_threshold = max_deletion;
+                    if (max_deletion < 1.) {
+                        max_deletion_threshold = max_deletion * ref_path_to_length.at(ref_path);
+                    }
+                    if (delta > max_deletion_threshold && ((double)ref_overlap_size / delta < overlap_threshold)) {
+                        if (verbose) {                            
+                            cerr << "[filter-paf-deletions]: detected deletion of size " << delta << " with overlap " << ref_overlap_size
+                                 << " on ref path " << graph->get_path_name(ref_path) << " with cur anchor ("
+                                 << cur_ref_start << ", " << cur_ref_end << ") and prev anchor (" << prev_ref_start << ", "
+                                 << prev_ref_end << ") and threshold " << max_deletion_threshold
+                                 << " on following paf line:\n  I=" << (prev_idx) <<": " << prev_paf
+                                 << "\n  J=" << i << ": " << cur_paf << endl << endl;
+                        }
+                        cut_points.push_back(i);
+                    }
+                    prev_idx = i;
+                }
+
+                // segments are [cut_point[i], cut_point[i+1])
+                cut_points.push_back(block_end + 1);
+
+                // hacky heuristic: we've segmented the block with cut points.  now drop the smallest segment
+                int64_t min_segment_start = -1;
+                int64_t min_segment_end = -1;
+                int64_t min_segment_matches = -1;
+                if (cut_points.size() > 2) {
+                    for (int64_t j = 0; j < cut_points.size() - 1; ++j) {
+                        // inclusive
+                        int64_t seg_first = cut_points[j];
+                        int64_t seg_last = cut_points[j+1] - 1;
+                        int64_t seg_matches = 0;
+                        for (int64_t k = seg_first; k <= seg_last; ++k) {
+                            if (!filtered_lines[k]) {
+                                seg_matches += paf_lines[k].num_matching;
+                            }
+                        }
+                        if (min_segment_matches < 0 || seg_matches < min_segment_matches) {
+                            min_segment_start = seg_first;
+                            min_segment_end = seg_last;
+                            min_segment_matches = seg_matches;
+                        }
+                    }
+
+                    int64_t lines_in_segment = 0;
+                    for (int64_t j = min_segment_start; j <= min_segment_end; ++j) {
+                        if (!filtered_lines[j]) {
+                            filtered_lines[j] = true;
+                            ++filtered_line_it;
+                            filtered_match_total += paf_lines[j].num_matching;
+                            ++lines_in_segment;
+                        }
+                    }
+
+                    if (verbose) {                            
+                        cerr << "[filter-paf-deletions]: filtering " << lines_in_segment << " PAF lines between (inclusively)\n  I="
+                             << min_segment_start << ": " << paf_lines[min_segment_start]
+                             << "\n  J=" << min_segment_end << ":  " << paf_lines[min_segment_end]
+                             << "\nfor a total of " << min_segment_matches << " matches" << endl << endl;
+                    }
+                }                        
+
+            });
+        
         if (progress) {
             cerr << "[filter-paf-deletions]: Iteration " << iteration << ": Found " << filtered_line_it << " lines to filter" << endl;
         }
         ++iteration;
+        filtered_line_total += filtered_line_it;
     } while (filtered_line_it > 0);
 
     if (progress) {
-        cerr << "[filter-paf-deletions]: Filtering out " << filtered_line_total << " paf lines" << endl;
+        cerr << "[filter-paf-deletions]: Filtering out " << filtered_line_total << " paf lines totaling " << filtered_match_total << " matches" << endl;
     }
 
     // output the unfiltered lines
@@ -236,160 +437,6 @@ static string strip_prefix(const string& name) {
         return name.substr(p + 1);
     }
     return name;
-}
-
-int64_t filter_paf(const PathHandleGraph* graph, ifstream& paf_file, const unordered_map<nid_t, Anchor>& ref_index,
-                   const IntervalTree<int64_t, int64_t>& ref_deletions,
-                   const unordered_map<string, nid_t>& mg_to_vg, int64_t max_deletion,
-                   double overlap_threshold, vector<bool>& filtered_lines, bool progress, bool verbose) {
-
-    paf_file.clear();
-    paf_file.seekg(0, ios::beg) ;
-    string buffer;
-
-    unordered_set<string> query_set;
-    string prev_query_name;
-    int64_t prev_query_start;
-    int64_t prev_query_end;
-    nid_t prev_target_id = 0;
-    int64_t prev_ref_start;
-    int64_t prev_ref_end;
-
-    // store matches in current block (run of mappings from same query that don't span a max_deletion)
-    vector<int64_t> line_to_block; // map paf line number to a block (this vector contains offsets to below vector)
-    vector<int64_t> blocks;
-    unordered_set<int64_t> cut_blocks; // offsets in above that mark block before max_deletion
-
-    size_t line_no = 0;
-    size_t unfiltered_line_no = 0;
-    while (getline(paf_file, buffer)) {
-        if (unfiltered_line_no >= filtered_lines.size()) {
-            // first pass
-            filtered_lines.push_back(false);
-        } else if (filtered_lines[unfiltered_line_no]) {
-            ++unfiltered_line_no;
-            continue;
-        }
-        vector<string> toks;
-        split_delims(buffer, "\t\n", toks);
-
-        // pretty silly not to have a paf parser in this repo
-        const string& query_name = toks[0];
-        int64_t query_start = stol(toks[2]);
-        int64_t query_end = stol(toks[3]);
-        string target_name = strip_prefix(toks[5]);
-        int64_t target_length = stol(toks[6]);
-        int64_t target_start = stol(toks[7]);
-        int64_t target_end = stol(toks[8]);
-        int64_t matches = stol(toks[9]);
-
-        // map the target interval onto the reference path
-        if (!mg_to_vg.count(target_name)) {
-            cerr << "[filter-paf-deletions] error: target name from PAF not found in translation: " << target_name << endl;
-            exit(1);
-        }
-        nid_t target_id = mg_to_vg.at(target_name);
-        const Anchor& anchor = ref_index.at(target_id);
-        int64_t ref_start = anchor.min_offset + target_start;
-        int64_t ref_end = anchor.max_offset - (target_length - target_end);
-
-#ifdef debug
-        cerr << "anchor " << target_id << " = " << anchor.min_offset << " , " << anchor.max_offset << endl;
-        cerr << "ref start = " << anchor.min_offset  << " + " << target_start << "   ref_end = " << anchor.max_offset << " - ("
-             << target_length << " - " << target_end << ");" << endl;
-#endif
-        bool continues_block = query_name == prev_query_name;
-        if (continues_block) {
-
-            if (prev_query_start > query_start) {
-                cerr << "Input paf not in order.  Sort with \"sort -k 1,1 -k 3,3n\" first.  Offending line:\n" << buffer << endl;
-                exit(1);
-            }
-            int64_t query_delta = abs(query_start - prev_query_end);
-            int64_t ref_delta = abs(ref_start - prev_ref_end);
-            int64_t delta = abs(ref_delta - query_delta);
-#ifdef debug
-            cerr << "query delta " << query_delta << " ref delta = " << ref_delta << " delta = " << delta << endl;
-#endif
-
-            int64_t ref_overlap_size = 0;
-            if (delta > 1) {
-                vector<Interval<int64_t, int64_t>> overlaps = ref_deletions.findOverlapping(min(prev_query_end, query_start), max(prev_query_end, query_start));
-                for (const auto& overlap : overlaps) {
-                    int64_t intersection_start = max(prev_query_end, overlap.start);
-                    int64_t intersection_stop = min(query_start, overlap.stop);
-                    ref_overlap_size = max(ref_overlap_size, intersection_stop - intersection_start);
-                }
-            }
-
-            if (delta > max_deletion && ((double)ref_overlap_size / delta < overlap_threshold)) {
-                if (verbose) {
-                    cerr << "[filter-paf-deletions]: detected deletion of size " << delta << " with overlap " << ref_overlap_size <<
-                        " on following paf line:"
-                         << " \n  " << buffer << endl;
-                }
-                continues_block = false;
-                cut_blocks.insert(blocks.size() - 1);
-            }
-        }
-
-        // update the current block may adding the matches (or assigng a new block if necessary)
-        if (!continues_block) {
-            blocks.push_back(0);
-        }
-        assert(!blocks.empty());
-        blocks.back() += matches;
-        line_to_block.push_back(blocks.size() - 1);
-
-        prev_query_name = query_name;
-        prev_query_start = query_start;
-        prev_query_end = query_end;
-        prev_target_id = target_id;
-        prev_ref_start = ref_start;
-        prev_ref_end = ref_end;
-        
-        ++line_no;
-        ++unfiltered_line_no;
-    }
-
-    // second pass to do filtering now that we have block sizes
-    paf_file.clear();
-    paf_file.seekg(0, ios::beg) ;
-
-    size_t filtered_line_count = 0;
-        
-    line_no = 0;
-    unfiltered_line_no = 0;
-    while (getline(paf_file, buffer)) {
-        if (filtered_lines[unfiltered_line_no]) {
-            ++unfiltered_line_no;
-            continue;
-        }
-
-        bool filter_out = false;        
-        int64_t cur_block = line_to_block[line_no];
-        if (cur_block > 0) {
-            int64_t prev_block = cur_block - 1;
-            if (cut_blocks.count(prev_block) && blocks[prev_block] >= blocks[cur_block]) {
-                filter_out = true;
-            }
-        }
-        if (!filter_out && cur_block < blocks.size() - 1) {
-            int64_t next_block = cur_block + 1;
-            if (cut_blocks.count(cur_block) && blocks[next_block] > blocks[cur_block]) {
-                filter_out =true;
-            }
-        }
-
-        if (filter_out) {
-            filtered_lines[unfiltered_line_no] = true;
-            ++filtered_line_count;
-        }
-        ++unfiltered_line_no;
-        ++line_no;
-    }
-
-    return filtered_line_count;
 }
 
 unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
@@ -487,37 +534,100 @@ unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
 
     return thread_results[0];
 }
-    
-IntervalTree<int64_t, int64_t> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index) {
 
-    vector<vector<Interval<int64_t, int64_t>>> thread_deletions(get_thread_count());
+vector<PafLine> load_paf(ifstream& paf_file) {
+
+    vector<PafLine> paf_lines;
+    string buffer;
+    while (getline(paf_file, buffer)) {
+        PafLine paf_line = parse_paf_line(buffer);
+        // dont use this
+        paf_line.cigar = "";
+        paf_lines.push_back(paf_line);
+    }
+    std::sort(paf_lines.begin(), paf_lines.end(), [&](const PafLine& p1, const PafLine& p2) {
+            return p1.query_name < p2.query_name || (p1.query_name == p2.query_name && p1.query_start < p2.query_start);
+        });
+    return paf_lines;
+}
+
+int64_t for_each_query_block(const vector<PafLine>& paf_lines, const vector<bool>& filtered_lines,
+                             function<void(int64_t, int64_t)> visit_block) {
+    if (paf_lines.empty()) {
+        assert(false);
+    }
+    int64_t block_start = -1;
+    int64_t block_end = -1;
+    string prev_query;
+    int64_t num_visits = 0;
+    for (int64_t i = 0; i < paf_lines.size(); ++i) {
+        if (filtered_lines[i]) {
+            continue;
+        }
+        const PafLine& paf = paf_lines[i];
+        if (block_start == -1) {
+            block_start = i;
+        } else if (paf.query_name != prev_query) {
+            assert(!prev_query.empty());
+            if (block_start > -1) {
+                // visit the previous block
+                visit_block(block_start, block_end);
+            }
+            ++num_visits;
+            //start a new block
+            block_start = i;
+        }
+        // update end of current block
+        block_end = i;
+        prev_query = paf.query_name;
+    }
+
+    if (block_end != -1) {
+        // visit last block if present
+        visit_block(block_start, block_end);
+        ++num_visits;
+    }
+    return num_visits;
+}
+
+unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index) {
+
+    vector<unordered_map<path_handle_t, vector<Interval<int64_t, int64_t>>>> thread_deletions(get_thread_count());
 
     // get approximate deletion intervals using the index
     graph->for_each_edge([&](edge_t edge) {
             const Anchor& a1 = index.at(graph->get_id(edge.first));
             const Anchor& a2 = index.at(graph->get_id(edge.second));
-            Interval<int64_t, int64_t> interval(0, 0, 0);
-            if (a1.min_offset < a2.min_offset) {
-                interval.start = a1.max_offset;
-                interval.stop = a2.min_offset;
-            } else {
-                interval.start = a2.max_offset;
-                interval.stop = a1.min_offset;                
+            if (a1.path_handle == a2.path_handle) {
+                Interval<int64_t, int64_t> interval(0, 0, 0);
+                if (a1.min_offset < a2.min_offset) {
+                    interval.start = a1.max_offset;
+                    interval.stop = a2.min_offset;
+                } else {
+                    interval.start = a2.max_offset;
+                    interval.stop = a1.min_offset;                
+                }
+                interval.value = interval.stop - interval.start;
+                if (interval.value > 1) {
+                    thread_deletions[omp_get_thread_num()][a1.path_handle].push_back(interval);
+                }
             }
-            interval.value = interval.stop - interval.start;
-            if (interval.value > 1) {
-                thread_deletions[omp_get_thread_num()].push_back(interval);
-            }            
         }, true);
 
     for (size_t i = 1; i < thread_deletions.size(); ++i) {
-        for (const auto& interval : thread_deletions[i]) {
-            thread_deletions[0].push_back(interval);
+        for (const auto& pi : thread_deletions[i]) {
+            for (const auto& interval : pi.second) {
+                thread_deletions[0][pi.first].push_back(interval);
+            }
         }
         thread_deletions[i].clear();
     }
-    IntervalTree<int64_t, int64_t> tree(thread_deletions[0]);
-    return tree;
+
+    unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>> path_to_tree;
+    for (const auto& pi : thread_deletions[0]) {
+        path_to_tree[pi.first] = IntervalTree<int64_t, int64_t>(pi.second);
+    }
+    return path_to_tree;
 }
 
 
@@ -536,30 +646,21 @@ pair<unordered_map<string, nid_t>, unordered_map<nid_t, string>> load_trans(cons
         vector<string> toks;
         split_delims(buffer, "\t\n", toks);
         assert(toks.size() == 3 && toks[0] == "T");
-        mg_to_vg[toks[1]] = stol(toks[2]);
-        vg_to_mg[stol(toks[2])] = toks[1];
+        string& mg_name = toks[1];
+        bool has_prefix = mg_name.compare(0, 3, "id=") == 0;
+        mg_to_vg[mg_name] = stol(toks[2]);
+        // hack to support prefixed or not minigraph
+        // just by keeping both versions in the map no matter what
+        // todo: parameterize prefix name
+        if (has_prefix) {
+            mg_to_vg[strip_prefix(mg_name)] = stol(toks[2]);
+        } else {
+            mg_to_vg["id=_MINIGRAPH_|" + mg_name] = stol(toks[2]);
+        }
+        vg_to_mg[stol(toks[2])] = mg_name;
     }
 
     return make_pair(mg_to_vg, vg_to_mg);    
-}
-
-
-vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems) {
-    size_t start = string::npos;
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (delims.find(s[i]) != string::npos) {
-            if (start != string::npos && i > start) {
-                elems.push_back(s.substr(start, i - start));
-            }
-            start = string::npos;
-        } else if (start == string::npos) {
-            start = i;
-        }
-    }
-    if (start != string::npos && start < s.size()) {
-        elems.push_back(s.substr(start, s.size() - start));
-    }
-    return elems;
 }
 
 unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream) {
