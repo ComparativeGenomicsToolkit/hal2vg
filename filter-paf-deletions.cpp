@@ -51,7 +51,7 @@ static pair<unordered_map<string, nid_t>, unordered_map<nid_t, string>> load_tra
 static unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
                                                 const string& ref_prefix);
 static unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>> index_deletions(const PathHandleGraph* graph, const unordered_map<nid_t, Anchor>& index);
-static vector<PafLine> load_paf(ifstream& paf_file);
+static pair<vector<PafLine>, unordered_map<int64_t, int64_t>> load_paf(ifstream& paf_file);
 static int64_t for_each_query_block(const vector<PafLine>& paf_lines, const vector<bool>& masking,
                                     function<void(int64_t, int64_t)> visit_block);
 static PafDelta get_delta(path_handle_t ref_path, const PafLine& prev_paf, const PafLine& cur_paf,
@@ -67,7 +67,7 @@ void help(char** argv) {
          << "  <threshold> : only remove deletions greater than this. if < 1, then interpreted as fraction of reference path size" << endl
          << endl
          << "options: " << endl
-         << "    -s, --segement N          Discontinuities of >= N bases used for compute segments [default=min(100000, <threshold>)]" << endl
+         << "    -m, --max-filter F        If F*<threshold> matches need to be pulled apart to resolve a single deletion, just leave it alone [1]" << endl
          << "    -r, --ref-prefix STR      Only consider paths whose names start with STR" << endl
          << "    -p, --progress            Print progress" << endl
          << "    -o, --filter-off-ref      Filter mappings that aren't in dominant ref" << endl        
@@ -85,14 +85,13 @@ int main(int argc, char** argv) {
     // only filter deletions that don't overlap an existing deletion by at least this much
     // (doesn't seem to a factor -- most big deletions not in minigraph)
     double overlap_threshold = 0.5;
-    double segment_threshold = 100000;
-    bool specified_segment_threshold = false;
+    double filter_threshold = 1.0;
     int c;
     optind = 1; 
     while (true) {
 
         static const struct option long_options[] = {
-            {"segment", required_argument, 0, 's'},
+            {"max-filter", required_argument, 0, 'm'},
             {"ref-prefix", required_argument, 0, 'r'},
             {"filter-off-ref", no_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},            
@@ -104,7 +103,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "s:r:khpvt:",
+        c = getopt_long (argc, argv, "m:r:khpvt:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -113,9 +112,8 @@ int main(int argc, char** argv) {
 
         switch (c)
         {
-        case 's':
-            segment_threshold = stol(optarg);
-            specified_segment_threshold = true;
+        case 'm':
+            filter_threshold = stof(optarg);
             break;            
         case 'r':
             ref_prefix = optarg;
@@ -174,22 +172,6 @@ int main(int argc, char** argv) {
     string paf_path = argv[optind++];
     double max_deletion = stof(argv[optind++]);
 
-    if (segment_threshold > max_deletion) {
-        if (specified_segment_threshold) {
-            cerr << "[filter-paf-deletions] error: segmentation threshold (-s) must be smaller than deletion threshold\n" << endl;
-            return 1;
-        } else {
-            segment_threshold = max_deletion;
-        }
-    }
-    
-    if (progress) {
-        cerr << "[filter-paf-deletions]: Using deletion threshold of " << max_deletion << " and segment threshold of " << segment_threshold << endl;
-    }
-    if (segment_threshold < 10000) {
-        cerr << "[filter-paf-deletions] warning: Segment threshold of " << segment_threshold << " is very low!" << endl;
-    }
-    
     // load the graph
     ifstream graph_stream(graph_path);
     if (!graph_stream) {
@@ -220,7 +202,9 @@ int main(int argc, char** argv) {
     }
 
     // load the paf into memory
-    vector<PafLine> paf_lines = load_paf(paf_file);
+    vector<PafLine> paf_lines;
+    unordered_map<int64_t, int64_t> orig_to_sorted;
+    std::tie(paf_lines, orig_to_sorted) = load_paf(paf_file);
     if (progress) {
         cerr << "[filter-paf-deletions]: Loaded " << paf_lines.size() << " paf lines" << endl;
     }
@@ -326,10 +310,10 @@ int main(int argc, char** argv) {
 
                 // try to find a gap that exceeds the length
                 int64_t prev_idx = -1;
-                // these are the boundaries of the segments in the block (pass segment_threshold)
-                vector<int64_t> segment_points = {block_start};
-                // for each boundary, we keep a flag of whether *must* be cut (pass deletion_threshold)
-                vector<bool> cut_points = {false};
+                // these are the boundaries of the deletions in the block
+                // the deletion is between cut_point[i] and cut_point[i] - 1
+                vector<int64_t> cut_points;
+                vector<int64_t> cut_sizes;
                 for (int64_t i = block_start; i <= block_end; ++i) {
                     if (filtered_lines[i]) {
                         continue;
@@ -351,79 +335,131 @@ int main(int argc, char** argv) {
                     const PafLine& prev_paf = paf_lines[prev_idx];
                     PafDelta paf_delta = get_delta(ref_path, prev_paf, cur_paf, mg_to_vg, ref_index, ref_deletions);
                     
-                    if (paf_delta.delta > segment_threshold) {
-                        segment_points.push_back(i);
-                        int64_t max_deletion_threshold = max_deletion;                    
-                        if (max_deletion < 1.) {
-                            max_deletion_threshold = max_deletion * ref_path_to_length.at(ref_path);
-                        }
-                        if (paf_delta.delta > max_deletion_threshold && ((double)paf_delta.ref_overlap_size / paf_delta.delta < overlap_threshold)) {
-                            if (verbose) {                            
-                                cerr << "[filter-paf-deletions]: detected deletion of size " << paf_delta.delta << " with overlap " << paf_delta.ref_overlap_size
-                                     << " on ref path " << graph->get_path_name(ref_path) << " with cur anchor ("
-                                     << paf_delta.cur_ref_start << ", " << paf_delta.cur_ref_end << ") and prev anchor (" << paf_delta.prev_ref_start << ", "
-                                     << paf_delta.prev_ref_end << ") and threshold " << max_deletion_threshold
-                                     << " on following paf line:\n  I=" << (prev_idx) <<": " << prev_paf
-                                     << "\n  J=" << i << ": " << cur_paf << endl << endl;
-                            }
-                            cut_points.push_back(true);
-                        } else {
-                            cut_points.push_back(false);
-                        }
+                    int64_t max_deletion_threshold = max_deletion;                    
+                    if (max_deletion < 1.) {
+                        max_deletion_threshold = max_deletion * ref_path_to_length.at(ref_path);
                     }
+                    if (paf_delta.delta > max_deletion_threshold && ((double)paf_delta.ref_overlap_size / paf_delta.delta < overlap_threshold)) {
+                        if (verbose) {                            
+                            cerr << "[filter-paf-deletions]: detected deletion of size " << paf_delta.delta << " with overlap " << paf_delta.ref_overlap_size
+                                 << " on ref path " << graph->get_path_name(ref_path) << " with cur anchor ("
+                                 << paf_delta.cur_ref_start << ", " << paf_delta.cur_ref_end << ") and prev anchor (" << paf_delta.prev_ref_start << ", "
+                                 << paf_delta.prev_ref_end << ") and threshold " << max_deletion_threshold
+                                 << " on following paf line:\n  I=" << (prev_idx) <<": " << prev_paf
+                                 << "\n  J=" << i << ": " << cur_paf << endl << endl;
+                        }
+                        cut_points.push_back(i);
+                        cut_sizes.push_back(paf_delta.delta);
+                    } 
+                
                     prev_idx = i;
                 }
 
-                // segments are [cut_point[i], cut_point[i+1])
-                segment_points.push_back(block_end + 1);
-                cut_points.push_back(false);
+                // greedy heuristic: for every deletion cut point, we try scanning forward and backward to find the minimum
+                // resolving block of lines whose removal solves the deletion
+                for (int64_t j = 0; j < cut_points.size(); ++j) {
+                    if (filtered_lines[cut_points[j]]) {
+                        continue;
+                    }
+                    // go backward                        
+                    int64_t backward_matches = 0;
+                    int64_t backward_candidate = -1; // last *unfiltered* line scanning left
+                    int64_t prev_idx = -1;
+                    for (int64_t k = cut_points[j] - 1; k >= block_start && backward_candidate == -1; --k) {
+                        if (!filtered_lines[k]) {
+                            if (prev_idx == -1) {
+                                prev_idx = k;
+                            }
+                            const PafLine& prev_paf = paf_lines[k];
+                            const PafLine& cur_paf = paf_lines[cut_points[j]];
+                            int64_t max_deletion_threshold = max_deletion;                    
+                            if (max_deletion < 1.) {
+                                max_deletion_threshold = max_deletion * ref_path_to_length.at(ref_path);
+                            }
+                            PafDelta paf_delta = get_delta(ref_path, prev_paf, cur_paf, mg_to_vg, ref_index, ref_deletions);
+                            if (paf_delta.delta < max_deletion_threshold) {
+                                backward_candidate = k;
+                            } else {
+                                backward_matches += paf_lines[k].num_matching;
+                            }
+                        }
+                    }
+                    if (backward_candidate == -1) {
+                        // need to delete block_start too
+                        backward_candidate = block_start - 1;        
+                    }
 
-                // hacky heuristic: we've segmented the block with segment points.  now drop the smallest segment
-                // but only if it borders on a flagged cut point
-                if (segment_points.size() > 2 && std::any_of(cut_points.begin(), cut_points.end(), [](bool b) { return b;})) {
+                    // go forward
+                    int64_t forward_matches = 0;
+                    int64_t forward_candidate = -1; // last *unfiltered* line scanning right
+                    for (int64_t k = cut_points[j]; k <= block_end && forward_candidate == -1 && prev_idx != -1; ++k) {                        
+                        if (!filtered_lines[k]) {
+                            const PafLine& prev_paf = paf_lines[prev_idx];
+                            const PafLine& cur_paf = paf_lines[k];
+                            int64_t max_deletion_threshold = max_deletion;                    
+                            if (max_deletion < 1.) {
+                                max_deletion_threshold = max_deletion * ref_path_to_length.at(ref_path);
+                            }                            
+                            PafDelta paf_delta = get_delta(ref_path, prev_paf, cur_paf, mg_to_vg, ref_index, ref_deletions);
+                            if (paf_delta.delta < max_deletion_threshold) {
+                                forward_candidate = k;
+                            } else {
+                                forward_matches += paf_lines[k].num_matching;
+                            }
+                        }
+                    }
+                    if (forward_candidate == -1) {
+                        // need to delete block_end too
+                        forward_candidate = block_end + 1;
+                    }
+
+                    assert(backward_candidate >= block_start - 1 && forward_candidate <= block_end + 1);
+
                     int64_t min_segment_start = -1;
                     int64_t min_segment_end = -1;
                     int64_t min_segment_matches = -1;
+                    if (backward_matches < forward_matches) {
+                        min_segment_start = backward_candidate + 1; // want to filter right of candidate (not include)
+                        min_segment_end = cut_points[j] - 1;
+                        min_segment_matches = backward_matches;
+                    } else {
+                        min_segment_start = cut_points[j];
+                        min_segment_end = forward_candidate - 1; // want to filter left of candidate (not include)
+                        min_segment_matches = forward_matches;                        
+                    }
 
-                    for (int64_t j = 0; j < segment_points.size() - 1; ++j) {
-                        if (cut_points[j] || cut_points[j+1]) {                            
-                            // inclusive
-                            int64_t seg_first = segment_points[j];
-                            int64_t seg_last = segment_points[j+1] - 1;
-                            int64_t seg_matches = 0;
-                            for (int64_t k = seg_first; k <= seg_last; ++k) {
+                    int64_t max_matches_deleted = filter_threshold * cut_sizes[j];
+                    if (j == 0) {
+                        assert(min_segment_start <= min_segment_end);
+                    } else if (min_segment_matches > 0) {
+                  
+                        if (min_segment_matches <= max_matches_deleted) {
+                            int64_t lines_in_segment = 0;
+                            for (int64_t k = min_segment_start; k <= min_segment_end; ++k) {
                                 if (!filtered_lines[k]) {
-                                    seg_matches += paf_lines[k].num_matching;
+                                    filtered_lines[k] = true;
+                                    ++filtered_line_it;
+                                    filtered_match_total += paf_lines[k].num_matching;
+                                    ++lines_in_segment;
                                 }
                             }
-                            if (min_segment_matches < 0 || seg_matches < min_segment_matches) {
-                                min_segment_start = seg_first;
-                                min_segment_end = seg_last;
-                                min_segment_matches = seg_matches;
+
+                            if (verbose) {
+                                cerr << "[filter-paf-deletions]: filtering " << lines_in_segment << " PAF lines between (inclusively)\n  I="
+                                     << min_segment_start << ": " << paf_lines[min_segment_start]
+                                     << "\n  J=" << min_segment_end << ":  " << paf_lines[min_segment_end]
+                                     << "\nfor a total of " << min_segment_matches << " matches" << endl << endl;
                             }
+                        } else {
+                            cerr << "[filter-paf-deletions]: leaving in PAF lines between (inclusively)\n  I="
+                                 << min_segment_start << ": " << paf_lines[min_segment_start]
+                                 << "\n  J=" << min_segment_end << ":  " << paf_lines[min_segment_end]
+                                 << "\nfor a total of " << min_segment_matches << " matches, which exceeds deletion threshold of " << max_matches_deleted
+                                 << endl << endl;
+
                         }
                     }
-
-                    assert(min_segment_matches >= 0);
-
-                    int64_t lines_in_segment = 0;
-                    for (int64_t j = min_segment_start; j <= min_segment_end; ++j) {
-                        if (!filtered_lines[j]) {
-                            filtered_lines[j] = true;
-                            ++filtered_line_it;
-                            filtered_match_total += paf_lines[j].num_matching;
-                            ++lines_in_segment;
-                        }
-                    }
-
-                    if (verbose) {                            
-                        cerr << "[filter-paf-deletions]: filtering " << lines_in_segment << " PAF lines between (inclusively)\n  I="
-                             << min_segment_start << ": " << paf_lines[min_segment_start]
-                             << "\n  J=" << min_segment_end << ":  " << paf_lines[min_segment_end]
-                             << "\nfor a total of " << min_segment_matches << " matches" << endl << endl;
-                    }
-                }                        
-
+                }
             });
         
         if (progress) {
@@ -442,9 +478,20 @@ int main(int argc, char** argv) {
     paf_file.seekg(0, ios::beg) ;
     string buffer;
     for (int64_t line_no = 0; line_no < filtered_lines.size(); ++line_no) {
+        int64_t sorted_line_no = orig_to_sorted.at(line_no);
         const auto& ret = getline(paf_file, buffer);
         assert(ret);
-        if (filtered_lines[line_no] == false) {
+
+        // sanity check:
+        PafLine paf_line = parse_paf_line(buffer);
+        assert(paf_line.query_name == paf_lines[sorted_line_no].query_name);
+        assert(paf_line.query_start == paf_lines[sorted_line_no].query_start);
+        assert(paf_line.query_end == paf_lines[sorted_line_no].query_end);
+        assert(paf_line.target_name == paf_lines[sorted_line_no].target_name);
+        assert(paf_line.target_start == paf_lines[sorted_line_no].target_start);
+        assert(paf_line.target_end == paf_lines[sorted_line_no].target_end);
+                
+        if (filtered_lines[sorted_line_no] == false) {
             cout << buffer << "\n";
         }
     }
@@ -558,20 +605,30 @@ unordered_map<nid_t, Anchor> index_graph(const PathHandleGraph* graph,
     return thread_results[0];
 }
 
-vector<PafLine> load_paf(ifstream& paf_file) {
+pair<vector<PafLine>, unordered_map<int64_t, int64_t>> load_paf(ifstream& paf_file) {
 
-    vector<PafLine> paf_lines;
+    vector<pair<int64_t, PafLine>> numbered_lines;
     string buffer;
+    int64_t line_no = 0;
     while (getline(paf_file, buffer)) {
         PafLine paf_line = parse_paf_line(buffer);
         // dont use this
         paf_line.cigar = "";
-        paf_lines.push_back(paf_line);
+        numbered_lines.push_back(make_pair(line_no++, paf_line));
     }
-    std::sort(paf_lines.begin(), paf_lines.end(), [&](const PafLine& p1, const PafLine& p2) {
-            return p1.query_name < p2.query_name || (p1.query_name == p2.query_name && p1.query_start < p2.query_start);
+    std::sort(numbered_lines.begin(), numbered_lines.end(), [&](const pair<int64_t, PafLine>& p1, const pair<int64_t, PafLine>& p2) {
+            return p1.second.query_name < p2.second.query_name ||
+                                          (p1.second.query_name == p2.second.query_name && p1.second.query_start < p2.second.query_start);
         });
-    return paf_lines;
+
+    vector<PafLine> paf_lines;
+    unordered_map<int64_t, int64_t> orig_to_sorted;
+    for (int64_t i = 0; i < numbered_lines.size(); ++i) {
+        paf_lines.push_back(numbered_lines[i].second);
+        orig_to_sorted[numbered_lines[i].first] = i;
+    }
+    
+    return make_pair(paf_lines, orig_to_sorted);
 }
 
 int64_t for_each_query_block(const vector<PafLine>& paf_lines, const vector<bool>& filtered_lines,
