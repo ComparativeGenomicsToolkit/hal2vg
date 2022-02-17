@@ -74,6 +74,6 @@ inline ostream& operator<<(ostream& os, const PafLine& paf) {
     os << paf.query_name << "\t" << paf.query_len << "\t" << paf.query_start << "\t" << paf.query_end << "\t"
        << string(1, paf.strand) << "\t"
        << paf.target_name << "\t" << paf.target_len << "\t" << paf.target_start << "\t" << paf.target_end << "\t"
-       << paf.num_matching << "\t" << paf.mapq;
+       << paf.num_matching << "\t" << paf.num_bases << "\t" << paf.mapq;
     return os;
 }
