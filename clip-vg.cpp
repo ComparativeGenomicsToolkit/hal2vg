@@ -35,6 +35,7 @@ void help(char** argv) {
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
        << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
        << "    -d, --drop-path PREFIX    Remove all paths with given PREFIX, and all nodes that are on no other paths (done after other filters)" << endl
+       << "    -o, --out-bed FILE        Save all clipped intervals here" << endl
        << "    -p, --progress            Print progress" << endl
        << endl;
 }    
@@ -58,6 +59,11 @@ static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string&
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
 static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool progress);
 
+static unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph);
+
+static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_intervals(
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& input_intervals,
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& output_intervals);
 
 // from path.cpp in vg
 // Check if using subpath naming scheme.  If it is return true,
@@ -115,6 +121,7 @@ int main(int argc, char** argv) {
     bool progress = false;
     vector<string> replace_list;
     string drop_prefix;
+    string out_bed_path;
     int c;
     optind = 1; 
     while (true) {
@@ -129,13 +136,14 @@ int main(int argc, char** argv) {
             {"name-replace", required_argument, 0, 'r'},
             {"no-orphan_filter", no_argument, 0, 'n'},
             {"drop-prefix", required_argument, 0, 'd'},
+            {"out-bed", required_argument, 0, 'o'},
             {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:d:",
+        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:d:o:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -170,6 +178,9 @@ int main(int argc, char** argv) {
             break;
         case 'd':
             drop_prefix = optarg;
+            break;
+        case 'o':
+            out_bed_path = optarg;
             break;
         case 'p':
             progress = true;
@@ -225,6 +236,14 @@ int main(int argc, char** argv) {
         cerr << "[clip-vg]: Loaded graph" << endl;
     }
 
+    unordered_map<string, vector<pair<int64_t, int64_t>>> input_graph_intervals;
+    if (!out_bed_path.empty()) {
+        input_graph_intervals = get_path_intervals(graph.get());
+        if (progress) {
+            cerr << "[clip-vg]: Graph has " << input_graph_intervals.size() << " paths." << endl;
+        }
+    }
+
     unordered_map<string, vector<pair<int64_t, int64_t>>> bed_intervals;
 
     if (!bed_path.empty()) {
@@ -276,6 +295,26 @@ int main(int argc, char** argv) {
 
     if (!drop_prefix.empty()) {
         drop_paths(graph.get(), drop_prefix, progress);
+    }
+
+    if (!out_bed_path.empty()) {
+        unordered_map<string, vector<pair<int64_t, int64_t>>> output_graph_intervals = get_path_intervals(graph.get());
+        for (const auto& xx : output_graph_intervals) {
+            cerr << " got output intervals " << xx.first << " count = " << xx.second.size() << endl;
+        }
+        unordered_map<string, vector<pair<int64_t, int64_t>>> clipped_graph_intervals = get_clipped_intervals(input_graph_intervals, output_graph_intervals);
+        ofstream out_bed_file(out_bed_path);
+        size_t icount = 0;
+        for (const auto& pi : clipped_graph_intervals) {
+            for (const auto& i : pi.second) {
+                out_bed_file << pi.first << "\t" << i.first << "\t" << i.second << "\n";
+                ++icount;
+            }
+        }
+        out_bed_file.flush();
+        if (progress) {
+            cerr << "[clip-vg]: Outputted " << icount << " clipped intervals to " << out_bed_path << endl;
+        }
     }
 
     dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
@@ -930,4 +969,82 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
     if (progress) {
         cerr << "[clip-vg]: Drop prefix removed " << removed_base_count << " bases from " << removed_node_count << " nodes in " << removed_path_count << " paths" << endl;        
     }
+}
+unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph) {
+    unordered_map<string, vector<pair<int64_t, int64_t>>> path_intervals;
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            string path_name = graph->get_path_name(path_handle);
+            tuple<bool, string, size_t, size_t> subpath_info = parse_subpath_name(path_name);
+            size_t path_len = 0;
+            graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                    path_len += graph->get_length(graph->get_handle_of_step(step_handle));
+                });
+            int64_t start = get<0>(subpath_info) ? get<2>(subpath_info) : 0;
+            if (get<0>(subpath_info)) {
+                path_name = get<1>(subpath_info);
+            }
+            vector<pair<int64_t, int64_t>>& intervals = path_intervals[path_name];        
+            intervals.push_back(make_pair(start, start + path_len));
+        });
+
+    for (auto& pi : path_intervals) {
+        std::sort(pi.second.begin(), pi.second.end(), [](const pair<int64_t, int64_t>& i1, const pair<int64_t, int64_t>& i2) {
+                return i1.first < i2.first || (i1.first == i2.first && i1.second < i2.second);
+            });
+    }
+
+    return path_intervals;
+}
+
+static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_intervals(
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& input_intervals,
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& output_intervals) {
+
+    unordered_map<string, vector<pair<int64_t, int64_t>>> clipped_intervals;
+
+    for (const auto& input_pi : input_intervals) {
+        const string& path_name = input_pi.first;
+        const auto& in_intervals = input_pi.second;
+        if (!output_intervals.count(path_name)) {
+            // path doesn't appear in output -> everything was clipped
+            clipped_intervals[path_name].insert(clipped_intervals[path_name].end(), in_intervals.begin(), in_intervals.end());
+            cerr << "clippin everything for " << path_name << endl;
+        } else {
+            cerr << "doin frag clip for " << path_name << endl;
+            const auto& out_intervals = output_intervals.at(path_name);
+            // note: clipping here is fairly simple because output intervals are a subset
+            // and nothing overlaps
+            int64_t j = 0;
+            int64_t k = 0;
+            for (int64_t i = 0; i < in_intervals.size(); ++i) {
+                // j: first out_interval that's not completely left of in_interval;
+                for (; j < out_intervals.size() && out_intervals[j].second < in_intervals[i].first; ++j);
+                // k: first out_interval that's completely right of in_interval
+                for (k = j; k < out_intervals.size() && out_intervals[k].first < in_intervals[i].second; ++k);
+                // [j, k) all out_intervals that are sub intervals of in_interval[i]
+                vector<pair<int64_t, int64_t>>&  gap_intervals = clipped_intervals[path_name];
+                if (k == j) {
+                    // nothing overlaps -- everything clipped
+                    gap_intervals.push_back(in_intervals[i]);
+                } else {
+                    // left of first interval                    
+                    if (out_intervals[j].first > in_intervals[i].first) {
+                        gap_intervals.push_back(make_pair(in_intervals[i].first, out_intervals[j].first));
+                    }
+                    // gaps between out_intervals
+                    for (int64_t l = 0; l < (int64_t)out_intervals.size() - 2; ++l) {
+                        if (out_intervals[l+1].first > out_intervals[l].second) {
+                            gap_intervals.push_back(make_pair(out_intervals[l].second, out_intervals[l+1].first));
+                        }
+                    }
+                    // right of last interval
+                    if (in_intervals[i].second > out_intervals.back().second) {
+                        gap_intervals.push_back(make_pair(out_intervals.back().second, in_intervals[i].second));
+                    }
+                }
+            }
+        }
+    }
+
+    return clipped_intervals;
 }
