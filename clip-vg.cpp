@@ -30,6 +30,7 @@ void help(char** argv) {
        << "    -b, --bed FILE            Intervals to clip in BED format" << endl
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
+       << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
@@ -42,7 +43,7 @@ void help(char** argv) {
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stream, const string& ref_prefix);
 static unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                            const string& ref_prefix);
+                                                                            const string& ref_prefix, const string& anchor_prefix);
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
@@ -114,6 +115,7 @@ int main(int argc, char** argv) {
     string bed_path;
     int64_t min_length = 0;
     int64_t max_unaligned = 0;
+    string anchor_prefix;
     string ref_prefix;
     size_t input_count = 0;
     bool force_clip = false;
@@ -131,6 +133,7 @@ int main(int argc, char** argv) {
             {"bed", required_argument, 0, 'b'},
             {"min-length", required_argument, 0, 'm'},
             {"max-unaligned", required_argument, 0, 'u'},
+            {"anchor", required_argument, 0, 'a'},
             {"ref-prefix", required_argument, 0, 'e'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
@@ -143,7 +146,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:d:o:",
+        c = getopt_long (argc, argv, "hpb:m:u:a:e:fnr:d:o:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -163,6 +166,9 @@ int main(int argc, char** argv) {
         case 'u':
             max_unaligned = stol(optarg);
             ++input_count;
+            break;
+        case 'a':
+            anchor_prefix = optarg;
             break;
         case 'e':
             ref_prefix = optarg;
@@ -223,6 +229,10 @@ int main(int argc, char** argv) {
         cerr <<  "[clip-vg] error: at east one of -b, -m, -u, -e or -r must be specified" << endl;
         return 1;
     }
+    if (!anchor_prefix.empty() && max_unaligned <= 0) {
+        cerr << "[clip-vg] error: -a cannot be used without -u" << endl;
+        return 1;
+    }
 
     string graph_path = argv[optind++];
     ifstream graph_stream(graph_path);
@@ -270,7 +280,7 @@ int main(int argc, char** argv) {
             });
     } else if (max_unaligned != 0) {
         // apply max unaligned length to all paths
-        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix);
+        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, anchor_prefix);
     }
     
     if (progress) {
@@ -362,8 +372,20 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stre
 }
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                     const string& ref_prefix) {
+                                                                     const string& ref_prefix, const string& anchor_prefix) {
     unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
+
+    // anchor-prefix means we consider a node unaligned if it doesn't align to a path with that prefix
+    // to do this check, we need a table of these paths:
+    unordered_set<path_handle_t> minigraph_paths;
+    if (!anchor_prefix.empty()) {
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
+                string path_name = graph->get_path_name(path_handle);
+                if (path_name.compare(0, anchor_prefix.length(), anchor_prefix) == 0) {
+                    minigraph_paths.insert(path_handle);
+                }
+            });
+    }
 
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
@@ -375,7 +397,12 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                         int64_t len = (int64_t)graph->get_length(handle);
                         bool aligned = false;
                         graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
-                                if (graph->get_path_handle_of_step(step_handle_2) != path_handle) {
+                                if (!anchor_prefix.empty()) {
+                                    if (minigraph_paths.count(graph->get_path_handle_of_step(step_handle_2))) {
+                                        aligned = true;
+                                    }
+                                }
+                                else if (graph->get_path_handle_of_step(step_handle_2) != path_handle) {
                                     aligned = true;
                                 }
                                 return !aligned;
@@ -386,7 +413,7 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                         }
                         // end an unaligned interval
                         if (aligned == true) {
-                            if (start >= 0 && offset + len - start > max_unaligned) {
+                            if (start >= 0 && offset - start > max_unaligned) {
                                 intervals[path_name].push_back(make_pair(start, offset));
                             }
                             start = -1;
