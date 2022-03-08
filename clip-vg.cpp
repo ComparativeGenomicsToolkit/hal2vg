@@ -36,6 +36,7 @@ void help(char** argv) {
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
        << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
        << "    -d, --drop-path PREFIX    Remove all paths with given PREFIX, and all nodes that are on no other paths (done after other filters)" << endl
+       << "    -L, --leave-aligned       When used in conjunction with -d, paths are prserved if they align to a non-dropped path" << endl 
        << "    -o, --out-bed FILE        Save all clipped intervals here" << endl
        << "    -p, --progress            Print progress" << endl
        << endl;
@@ -58,7 +59,7 @@ static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, c
                                          bool progress);
 static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
-static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool progress);
+static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress);
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph);
 
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
     bool progress = false;
     vector<string> replace_list;
     string drop_prefix;
+    bool leave_aligned_drop_paths = false;
     string out_bed_path;
     int c;
     optind = 1; 
@@ -139,6 +141,7 @@ int main(int argc, char** argv) {
             {"name-replace", required_argument, 0, 'r'},
             {"no-orphan_filter", no_argument, 0, 'n'},
             {"drop-prefix", required_argument, 0, 'd'},
+            {"leave-aligned", no_argument, 0, 'L'},
             {"out-bed", required_argument, 0, 'o'},
             {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
@@ -146,7 +149,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:a:e:fnr:d:o:",
+        c = getopt_long (argc, argv, "hpb:m:u:a:e:fnr:d:Lo:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -184,6 +187,9 @@ int main(int argc, char** argv) {
             break;
         case 'd':
             drop_prefix = optarg;
+            break;
+        case 'L':
+            leave_aligned_drop_paths = true;
             break;
         case 'o':
             out_bed_path = optarg;
@@ -231,6 +237,11 @@ int main(int argc, char** argv) {
     }
     if (!anchor_prefix.empty() && max_unaligned <= 0) {
         cerr << "[clip-vg] error: -a cannot be used without -u" << endl;
+        return 1;
+    }
+    
+    if (leave_aligned_drop_paths && drop_prefix.empty()) {
+        cerr << "[clip-vg] error: -L can only be used with -d" << endl;
         return 1;
     }
 
@@ -304,7 +315,7 @@ int main(int argc, char** argv) {
     }
 
     if (!drop_prefix.empty()) {
-        drop_paths(graph.get(), drop_prefix, progress);
+        drop_paths(graph.get(), drop_prefix, leave_aligned_drop_paths, progress);
     }
 
     if (!out_bed_path.empty()) {
@@ -946,7 +957,7 @@ vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* grap
 // this used to get done by hal2vg, but it's useful to keep them around so that -u option will work
 // better.  ie this way, a path that's private to a sample but still in the minigraph will be kept
 // because it aligns to two paths whereas if minigraph paths weren't in, it'd be deleted
-void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool progress) {
+void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress) {
 
     unordered_set<nid_t> to_destroy;
     size_t removed_path_count = 0;
@@ -963,9 +974,12 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
         if (path_name.compare(0, drop_prefix.length(), drop_prefix) == 0) {
             // we've found a path with the given prefix: now destroy all handles that don't touch
             // any path *without* the prefix
+            size_t offset = 0;
+            vector<pair<int64_t, int64_t>> intervals;
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     handle_t handle = graph->get_handle_of_step(step_handle);
                     bool has_other_path = false;
+                    size_t len = graph->get_length(handle);
                     graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
                             path_handle_t other_path_handle = graph->get_path_handle_of_step(step_handle_2);
                             if (other_path_handle != path_handle &&
@@ -977,11 +991,23 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
                         });
                     if (!has_other_path) {
                         to_destroy.insert(graph->get_id(handle));
+                        if (!intervals.empty() && offset == intervals.back().second) {
+                            intervals.back().second += len;
+                        } else {
+                            intervals.push_back(make_pair(offset, offset + len));
+                        }
                     }
+                    offset += len;
                 });
-            // detroy the path
-            graph->destroy_path(path_handle);
-            removed_path_count++;
+            if (leave_aligned && !intervals.empty()) {
+                // chop the path (to keep fragments for any non-destroyed nodes)
+                chop_path(graph, path_handle, intervals);
+            }
+            if (!leave_aligned || !intervals.empty()) {
+                // detroy the path            
+                graph->destroy_path(path_handle);
+                removed_path_count++;
+            }
         }
         }
 
