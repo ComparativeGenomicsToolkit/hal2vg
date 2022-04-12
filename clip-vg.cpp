@@ -30,18 +30,21 @@ void help(char** argv) {
        << "    -b, --bed FILE            Intervals to clip in BED format" << endl
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
+       << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
        << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
        << "    -d, --drop-path PREFIX    Remove all paths with given PREFIX, and all nodes that are on no other paths (done after other filters)" << endl
+       << "    -L, --leave-aligned       When used in conjunction with -d, paths are prserved if they align to a non-dropped path" << endl 
+       << "    -o, --out-bed FILE        Save all clipped intervals here" << endl
        << "    -p, --progress            Print progress" << endl
        << endl;
 }    
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stream, const string& ref_prefix);
 static unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                            const string& ref_prefix);
+                                                                            const string& ref_prefix, const string& anchor_prefix);
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
@@ -56,8 +59,13 @@ static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, c
                                          bool progress);
 static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
-static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool progress);
+static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress);
 
+static unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph);
+
+static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_intervals(
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& input_intervals,
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& output_intervals);
 
 // from path.cpp in vg
 // Check if using subpath naming scheme.  If it is return true,
@@ -108,6 +116,7 @@ int main(int argc, char** argv) {
     string bed_path;
     int64_t min_length = 0;
     int64_t max_unaligned = 0;
+    string anchor_prefix;
     string ref_prefix;
     size_t input_count = 0;
     bool force_clip = false;
@@ -115,6 +124,8 @@ int main(int argc, char** argv) {
     bool progress = false;
     vector<string> replace_list;
     string drop_prefix;
+    bool leave_aligned_drop_paths = false;
+    string out_bed_path;
     int c;
     optind = 1; 
     while (true) {
@@ -124,18 +135,21 @@ int main(int argc, char** argv) {
             {"bed", required_argument, 0, 'b'},
             {"min-length", required_argument, 0, 'm'},
             {"max-unaligned", required_argument, 0, 'u'},
+            {"anchor", required_argument, 0, 'a'},
             {"ref-prefix", required_argument, 0, 'e'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
             {"no-orphan_filter", no_argument, 0, 'n'},
             {"drop-prefix", required_argument, 0, 'd'},
+            {"leave-aligned", no_argument, 0, 'L'},
+            {"out-bed", required_argument, 0, 'o'},
             {"progress", no_argument, 0, 'p'},
             {0, 0, 0, 0}
         };
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:e:fnr:d:",
+        c = getopt_long (argc, argv, "hpb:m:u:a:e:fnr:d:Lo:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -156,6 +170,9 @@ int main(int argc, char** argv) {
             max_unaligned = stol(optarg);
             ++input_count;
             break;
+        case 'a':
+            anchor_prefix = optarg;
+            break;
         case 'e':
             ref_prefix = optarg;
             break;
@@ -170,6 +187,12 @@ int main(int argc, char** argv) {
             break;
         case 'd':
             drop_prefix = optarg;
+            break;
+        case 'L':
+            leave_aligned_drop_paths = true;
+            break;
+        case 'o':
+            out_bed_path = optarg;
             break;
         case 'p':
             progress = true;
@@ -212,6 +235,15 @@ int main(int argc, char** argv) {
         cerr <<  "[clip-vg] error: at east one of -b, -m, -u, -e or -r must be specified" << endl;
         return 1;
     }
+    if (!anchor_prefix.empty() && max_unaligned <= 0) {
+        cerr << "[clip-vg] error: -a cannot be used without -u" << endl;
+        return 1;
+    }
+    
+    if (leave_aligned_drop_paths && drop_prefix.empty()) {
+        cerr << "[clip-vg] error: -L can only be used with -d" << endl;
+        return 1;
+    }
 
     string graph_path = argv[optind++];
     ifstream graph_stream(graph_path);
@@ -223,6 +255,14 @@ int main(int argc, char** argv) {
     graph_stream.close();
     if (progress) {
         cerr << "[clip-vg]: Loaded graph" << endl;
+    }
+
+    unordered_map<string, vector<pair<int64_t, int64_t>>> input_graph_intervals;
+    if (!out_bed_path.empty()) {
+        input_graph_intervals = get_path_intervals(graph.get());
+        if (progress) {
+            cerr << "[clip-vg]: Graph has " << input_graph_intervals.size() << " paths." << endl;
+        }
     }
 
     unordered_map<string, vector<pair<int64_t, int64_t>>> bed_intervals;
@@ -251,7 +291,7 @@ int main(int argc, char** argv) {
             });
     } else if (max_unaligned != 0) {
         // apply max unaligned length to all paths
-        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix);
+        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, anchor_prefix);
     }
     
     if (progress) {
@@ -275,7 +315,27 @@ int main(int argc, char** argv) {
     }
 
     if (!drop_prefix.empty()) {
-        drop_paths(graph.get(), drop_prefix, progress);
+        drop_paths(graph.get(), drop_prefix, leave_aligned_drop_paths, progress);
+    }
+
+    if (!out_bed_path.empty()) {
+        unordered_map<string, vector<pair<int64_t, int64_t>>> output_graph_intervals = get_path_intervals(graph.get());
+        for (const auto& xx : output_graph_intervals) {
+            cerr << " got output intervals " << xx.first << " count = " << xx.second.size() << endl;
+        }
+        unordered_map<string, vector<pair<int64_t, int64_t>>> clipped_graph_intervals = get_clipped_intervals(input_graph_intervals, output_graph_intervals);
+        ofstream out_bed_file(out_bed_path);
+        size_t icount = 0;
+        for (const auto& pi : clipped_graph_intervals) {
+            for (const auto& i : pi.second) {
+                out_bed_file << pi.first << "\t" << i.first << "\t" << i.second << "\n";
+                ++icount;
+            }
+        }
+        out_bed_file.flush();
+        if (progress) {
+            cerr << "[clip-vg]: Outputted " << icount << " clipped intervals to " << out_bed_path << endl;
+        }
     }
 
     dynamic_cast<SerializableHandleGraph*>(graph.get())->serialize(cout);
@@ -323,8 +383,20 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stre
 }
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                     const string& ref_prefix) {
+                                                                     const string& ref_prefix, const string& anchor_prefix) {
     unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
+
+    // anchor-prefix means we consider a node unaligned if it doesn't align to a path with that prefix
+    // to do this check, we need a table of these paths:
+    unordered_set<path_handle_t> minigraph_paths;
+    if (!anchor_prefix.empty()) {
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
+                string path_name = graph->get_path_name(path_handle);
+                if (path_name.compare(0, anchor_prefix.length(), anchor_prefix) == 0) {
+                    minigraph_paths.insert(path_handle);
+                }
+            });
+    }
 
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
@@ -336,7 +408,12 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                         int64_t len = (int64_t)graph->get_length(handle);
                         bool aligned = false;
                         graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
-                                if (graph->get_path_handle_of_step(step_handle_2) != path_handle) {
+                                if (!anchor_prefix.empty()) {
+                                    if (minigraph_paths.count(graph->get_path_handle_of_step(step_handle_2))) {
+                                        aligned = true;
+                                    }
+                                }
+                                else if (graph->get_path_handle_of_step(step_handle_2) != path_handle) {
                                     aligned = true;
                                 }
                                 return !aligned;
@@ -347,7 +424,7 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                         }
                         // end an unaligned interval
                         if (aligned == true) {
-                            if (start >= 0 && offset + len - start > max_unaligned) {
+                            if (start >= 0 && offset - start > max_unaligned) {
                                 intervals[path_name].push_back(make_pair(start, offset));
                             }
                             start = -1;
@@ -880,7 +957,7 @@ vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* grap
 // this used to get done by hal2vg, but it's useful to keep them around so that -u option will work
 // better.  ie this way, a path that's private to a sample but still in the minigraph will be kept
 // because it aligns to two paths whereas if minigraph paths weren't in, it'd be deleted
-void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool progress) {
+void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress) {
 
     unordered_set<nid_t> to_destroy;
     size_t removed_path_count = 0;
@@ -897,9 +974,12 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
         if (path_name.compare(0, drop_prefix.length(), drop_prefix) == 0) {
             // we've found a path with the given prefix: now destroy all handles that don't touch
             // any path *without* the prefix
+            size_t offset = 0;
+            vector<pair<int64_t, int64_t>> intervals;
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     handle_t handle = graph->get_handle_of_step(step_handle);
                     bool has_other_path = false;
+                    size_t len = graph->get_length(handle);
                     graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
                             path_handle_t other_path_handle = graph->get_path_handle_of_step(step_handle_2);
                             if (other_path_handle != path_handle &&
@@ -911,11 +991,23 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
                         });
                     if (!has_other_path) {
                         to_destroy.insert(graph->get_id(handle));
+                        if (!intervals.empty() && offset == intervals.back().second) {
+                            intervals.back().second += len;
+                        } else {
+                            intervals.push_back(make_pair(offset, offset + len));
+                        }
                     }
+                    offset += len;
                 });
-            // detroy the path
-            graph->destroy_path(path_handle);
-            removed_path_count++;
+            if (leave_aligned && !intervals.empty()) {
+                // chop the path (to keep fragments for any non-destroyed nodes)
+                chop_path(graph, path_handle, intervals);
+            }
+            if (!leave_aligned || !intervals.empty()) {
+                // detroy the path            
+                graph->destroy_path(path_handle);
+                removed_path_count++;
+            }
         }
         }
 
@@ -930,4 +1022,82 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
     if (progress) {
         cerr << "[clip-vg]: Drop prefix removed " << removed_base_count << " bases from " << removed_node_count << " nodes in " << removed_path_count << " paths" << endl;        
     }
+}
+unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph) {
+    unordered_map<string, vector<pair<int64_t, int64_t>>> path_intervals;
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            string path_name = graph->get_path_name(path_handle);
+            tuple<bool, string, size_t, size_t> subpath_info = parse_subpath_name(path_name);
+            size_t path_len = 0;
+            graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                    path_len += graph->get_length(graph->get_handle_of_step(step_handle));
+                });
+            int64_t start = get<0>(subpath_info) ? get<2>(subpath_info) : 0;
+            if (get<0>(subpath_info)) {
+                path_name = get<1>(subpath_info);
+            }
+            vector<pair<int64_t, int64_t>>& intervals = path_intervals[path_name];        
+            intervals.push_back(make_pair(start, start + path_len));
+        });
+
+    for (auto& pi : path_intervals) {
+        std::sort(pi.second.begin(), pi.second.end(), [](const pair<int64_t, int64_t>& i1, const pair<int64_t, int64_t>& i2) {
+                return i1.first < i2.first || (i1.first == i2.first && i1.second < i2.second);
+            });
+    }
+
+    return path_intervals;
+}
+
+static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_intervals(
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& input_intervals,
+    const unordered_map<string, vector<pair<int64_t, int64_t>>>& output_intervals) {
+
+    unordered_map<string, vector<pair<int64_t, int64_t>>> clipped_intervals;
+
+    for (const auto& input_pi : input_intervals) {
+        const string& path_name = input_pi.first;
+        const auto& in_intervals = input_pi.second;
+        if (!output_intervals.count(path_name)) {
+            // path doesn't appear in output -> everything was clipped
+            clipped_intervals[path_name].insert(clipped_intervals[path_name].end(), in_intervals.begin(), in_intervals.end());
+            cerr << "clippin everything for " << path_name << endl;
+        } else {
+            cerr << "doin frag clip for " << path_name << endl;
+            const auto& out_intervals = output_intervals.at(path_name);
+            // note: clipping here is fairly simple because output intervals are a subset
+            // and nothing overlaps
+            int64_t j = 0;
+            int64_t k = 0;
+            for (int64_t i = 0; i < in_intervals.size(); ++i) {
+                // j: first out_interval that's not completely left of in_interval;
+                for (; j < out_intervals.size() && out_intervals[j].second < in_intervals[i].first; ++j);
+                // k: first out_interval that's completely right of in_interval
+                for (k = j; k < out_intervals.size() && out_intervals[k].first < in_intervals[i].second; ++k);
+                // [j, k) all out_intervals that are sub intervals of in_interval[i]
+                vector<pair<int64_t, int64_t>>&  gap_intervals = clipped_intervals[path_name];
+                if (k == j) {
+                    // nothing overlaps -- everything clipped
+                    gap_intervals.push_back(in_intervals[i]);
+                } else {
+                    // left of first interval                    
+                    if (out_intervals[j].first > in_intervals[i].first) {
+                        gap_intervals.push_back(make_pair(in_intervals[i].first, out_intervals[j].first));
+                    }
+                    // gaps between out_intervals
+                    for (int64_t l = 0; l < (int64_t)out_intervals.size() - 2; ++l) {
+                        if (out_intervals[l+1].first > out_intervals[l].second) {
+                            gap_intervals.push_back(make_pair(out_intervals[l].second, out_intervals[l+1].first));
+                        }
+                    }
+                    // right of last interval
+                    if (in_intervals[i].second > out_intervals.back().second) {
+                        gap_intervals.push_back(make_pair(out_intervals.back().second, in_intervals[i].second));
+                    }
+                }
+            }
+        }
+    }
+
+    return clipped_intervals;
 }

@@ -97,7 +97,7 @@ halUnclip.o : halUnclip.cpp subpaths.h ${basicLibsDependencies}
 halUnclip : halUnclip.o ${basicLibsDependencies} 
 	${cpp} ${CXXFLAGS} -fopenmp -pthread halUnclip.o  ${basicLibs}  -o halUnclip
 
-filter-paf-deletions.o : filter-paf-deletions.cpp subpaths.h ${basicLibsDependencies}
+filter-paf-deletions.o : filter-paf-deletions.cpp subpaths.h paf.hpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . filter-paf-deletions.cpp -c
 
 filter-paf-deletions : filter-paf-deletions.o ${basicLibsDependencies} 
