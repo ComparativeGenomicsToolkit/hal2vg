@@ -219,7 +219,7 @@ int main(int argc, char** argv) {
     if (progress) {
         cerr << "[count-vg-hap-depth]: Merging data from different threads" << endl;
     }
-
+    
     // merge up the threads
     for (int64_t t = 1; t < get_thread_count(); ++t) {
         for (int64_t coverage = 0; coverage < depth_base_counts[t].size(); ++coverage) {
@@ -243,17 +243,60 @@ int main(int argc, char** argv) {
         }
     }
 
+    // there's almost certainly an stl one-line for this.. oh well
+    function<vector<int64_t>(const vector<int64_t>&)> get_cumul = [](const vector<int64_t>& v) {
+        int64_t tot = 0;
+        vector<int64_t> cumul(v.size(), 0);
+        for (int64_t i = 0; i < v.size(); ++i) {
+            tot += v[i];
+            cumul[i] = tot;
+        }
+        return cumul;
+    };
+    function<vector<int64_t>(const vector<int64_t>&)> get_lumuc = [](const vector<int64_t>& v) {
+        int64_t tot = 0;
+        vector<int64_t> cumul(v.size(), 0);
+        for (int64_t i = v.size() - 1; i >= 0; --i) {
+            tot += v[i];
+            cumul[i] = tot;
+        }
+        return cumul;
+    };
+    
+    // keep cumulative counts while we're at it
+    // cumulate from 0
+    vector<int64_t> node_counts_cumul = get_cumul(depth_node_counts[0]);
+    vector<int64_t> base_counts_cumul = get_cumul(depth_base_counts[0]);
+    vector<int64_t> node_counts_nonref_cumul = get_cumul(depth_node_counts_nonref[0]);
+    vector<int64_t> base_counts_nonref_cumul = get_cumul(depth_base_counts_nonref[0]);
+
+    //cumulate from end
+    vector<int64_t> node_counts_lumuc = get_lumuc(depth_node_counts[0]);
+    vector<int64_t> base_counts_lumuc = get_lumuc(depth_base_counts[0]);
+    vector<int64_t> node_counts_nonref_lumuc = get_lumuc(depth_node_counts_nonref[0]);
+    vector<int64_t> base_counts_nonref_lumuc = get_lumuc(depth_base_counts_nonref[0]);
+
     // print the results
-    cout << "hap-depth\tnodes\tbases";
+    cout << "hap-depth"
+         << "\t" << "nodes" << "\t" << "bases"
+         << "\t" << "nodes-cumul" << "\t" <<"bases-cumul"
+         << "\t" << "nodes-cumul-rev" << "\t" << "bases-cumul-rev";
     if (!ref_sample.empty()) {
-        cout << "\tnonref-nodes\tnonref-bases";
+        cout << "\t" << "nodes-nonref" << "\t" << "bases-nonref"
+             << "\t" << "nodes-cumul-nonref" << "\t" << "bases-cumul-nonref"
+             << "\t" << "nodes-cumul-rev-nonref" << "\t" << "bases-cumul-rev-nonref";
     }
     cout << endl;
 
-    for (int64_t coverage = 0; coverage < depth_base_counts[0].size(); ++coverage) {
-        cout << coverage << "\t" << depth_node_counts[0][coverage] << "\t" << depth_base_counts[0][coverage];
+    for (int64_t coverage = 0; coverage < depth_base_counts[0].size(); ++coverage) {        
+        cout << coverage
+             << "\t" << depth_node_counts[0][coverage] << "\t" << depth_base_counts[0][coverage]
+             << "\t" << node_counts_cumul[coverage] << "\t" << base_counts_cumul[coverage]
+             << "\t" << node_counts_lumuc[coverage] << "\t" << base_counts_lumuc[coverage];
         if (!ref_sample.empty()) {
-            cout << "\t" << depth_node_counts_nonref[0][coverage] << "\t" << depth_base_counts_nonref[0][coverage];
+            cout << "\t" << depth_node_counts_nonref[0][coverage] << "\t" << depth_base_counts_nonref[0][coverage]
+                 << "\t" << node_counts_nonref_cumul[coverage] << "\t" << base_counts_nonref_cumul[coverage]
+                 << "\t" << node_counts_nonref_lumuc[coverage] << "\t" << base_counts_nonref_lumuc[coverage];
         }
         cout << "\n";
     }
