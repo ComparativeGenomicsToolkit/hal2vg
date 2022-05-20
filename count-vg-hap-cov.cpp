@@ -1,0 +1,262 @@
+// Count the number of bases that aren't in a given reference sample.
+// Print the table of results stratisfied by number of covering samples
+// Assume's current cactus convertion of Sample.Haplotype.Contig
+
+//#define debug
+
+#include <cstdlib>
+#include <iostream>
+#include <cassert>
+#include <fstream>
+#include <deque>
+#include <unordered_map>
+#include <unistd.h>
+#include <getopt.h>
+#include <omp.h>
+
+#include "bdsg/packed_graph.hpp"
+#include "bdsg/hash_graph.hpp"
+#include "bdsg/odgi.hpp"
+
+using namespace std;
+using namespace handlegraph;
+using namespace bdsg;
+
+static unique_ptr<PathHandleGraph> load_graph(istream& graph_stream) {
+
+    char magic_bytes[4];
+    graph_stream.read(magic_bytes, 4);
+    uint32_t magic_number = ntohl(*((uint32_t*) magic_bytes));
+    graph_stream.clear();
+    graph_stream.seekg(0, ios::beg);
+
+    PathHandleGraph* graph;
+    if (magic_number == PackedGraph().get_magic_number()) {
+        graph = new PackedGraph();
+    } else if (magic_number == HashGraph().get_magic_number()) {
+        graph = new HashGraph();
+    } else if (magic_number == ODGI().get_magic_number()) {
+        graph = new ODGI();
+    } else {
+        cerr << "Unable to parse input graph with magic number " << magic_number << endl;
+        exit(1);
+    }
+    dynamic_cast<SerializableHandleGraph*>(graph)->deserialize(graph_stream);
+
+    return unique_ptr<PathHandleGraph>(graph);
+}
+
+void help(char** argv) {
+  cerr << "usage: " << argv[0] << " [options] <graph> [graph] [graph] [...]" << endl
+       << "Count nodes and bp in graph covered by different sample counts\n" 
+       << "Assumes SAMPLE.HAPLOTYPE.CONTIG path name format" << endl
+       << endl
+       << "options: " << endl
+       << "    -r, --reference           Include counts of nodes that are not present in the given reference sample prefix" << endl
+       << "    -i, --ignore              Completely ignore all paths with given prefix [default: _MINIGRAPH_]" << endl
+       << "    -t, --threads             Number of threads [default: all]" << endl
+       << "    -p, --progress            Print progress" << endl      
+       << endl;
+}    
+
+// returns SAMPLE.HAPLOTYPE
+// todo: vg/bdsg in progress of adpoting conventions / api
+// to manage stuff like this -- should switch to using that
+const string& get_sample_name(const PathHandleGraph* graph, path_handle_t path_handle,
+                              unordered_map<path_handle_t, string>& name_map) {
+    if (!name_map.count(path_handle)) {
+        string path_name = graph->get_path_name(path_handle);
+        string sample;
+        int dots = 0;
+        for (int64_t i = 0; i < path_name.length(); ++i) {
+            if (path_name[i] == '.') {
+                ++dots;
+            }
+            if (dots == 2) {
+                break;
+            }
+            sample.push_back(path_name[i]);
+        }
+        name_map[path_handle] = sample;        
+    }
+    return name_map.at(path_handle);
+}
+
+int main(int argc, char** argv) {
+
+    string ref_sample;
+    string ignore_sample = "_MINIGRAPH_";
+    bool progress = false;
+    
+    int c;
+    optind = 1; 
+    while (true) {
+
+        static const struct option long_options[] = {
+            {"help", no_argument, 0, 'h'},
+            {"ref-sample", required_argument, 0, 'r'},
+            {"ignore", required_argument, 0, 'i'},
+            {"threads", required_argument, 0, 't'},
+            {"progress", no_argument, 0, 'p'},            
+            {0, 0, 0, 0}
+        };
+
+        int option_index = 0;
+
+        c = getopt_long (argc, argv, "hr:t:p",
+                         long_options, &option_index);
+
+        // Detect the end of the options.
+        if (c == -1)
+            break;
+
+        switch (c)
+        {
+        case 'r':
+            ref_sample = optarg;
+            break;
+        case 't':
+            {
+                int num_threads = stoi(optarg);
+                if (num_threads <= 0) {
+                    cerr << "error:[count-vg-hap-depth] Thread count (-t) set to " << num_threads << ", must set to a positive integer." << endl;
+                    exit(1);
+                }
+                omp_set_num_threads(num_threads);
+                break;                
+            }
+        case 'p':
+            progress = true;
+            break;            
+        case 'h':
+        case '?':
+            /* getopt_long already printed an error message. */
+            help(argv);
+            exit(1);
+            break;
+        default:
+            abort ();
+        }
+    }
+
+    if (argc <= 1) {
+        help(argv);
+        return 1;
+    }
+
+    // Parse the positional argument
+    if (optind >= argc) {
+        cerr << "[count-vg-hap-depth] error: too few arguments" << endl;
+        help(argv);
+        return 1;
+    }
+
+    // depth stats (one per thread)
+    vector<vector<int64_t>> depth_base_counts(get_thread_count());
+    vector<vector<int64_t>> depth_node_counts(get_thread_count());
+    vector<vector<int64_t>> depth_base_counts_nonref(get_thread_count());
+    vector<vector<int64_t>> depth_node_counts_nonref(get_thread_count());    
+
+    // do counts for each graph arg
+    while(optind < argc) {
+
+        string graph_path = argv[optind++];
+        ifstream graph_stream(graph_path);
+        if (!graph_stream) {
+            cerr << "[count-vg-hap-depth] error: Unable to open input graph " << graph_path << endl;
+            return 1;
+        }    
+        unique_ptr<PathHandleGraph> graph = load_graph(graph_stream);
+        graph_stream.close();
+        if (progress) {
+            cerr << "[count-vg-hap-depth]: Loaded graph" << endl;
+        }
+
+        // path handle to sample key (one per thread)
+        vector<unordered_map<path_handle_t, string>> name_maps(get_thread_count());
+    
+        if (progress) {
+            cerr << "[count-vg-hap-depth]: Calculating coverage with " << depth_base_counts.size() << " threads" << endl;
+        }
+
+        graph->for_each_handle([&](handle_t handle) {
+                int64_t t = omp_get_thread_num();
+                // collect all the samples that step on the node
+                set<string> sample_set;
+                bool ref = false;
+                graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle) {
+                        const string& sample_name = get_sample_name(graph.get(), graph->get_path_handle_of_step(step_handle), name_maps[t]);
+                        if (ignore_sample.empty() || sample_name.compare(0, ignore_sample.length(), ignore_sample) != 0) {
+                            if (!ref && sample_name.compare(0, ref_sample.length(), ref_sample) == 0) {
+                                ref = true;
+                            }
+                            sample_set.insert(sample_name);
+                        }
+                    });
+                // update the total coverage
+                int64_t coverage = sample_set.size();
+                if (depth_base_counts[t].size() <= coverage) {
+                    depth_base_counts[t].resize(coverage + 1, 0);
+                    depth_node_counts[t].resize(coverage + 1, 0);
+                }
+                depth_base_counts[t][coverage] += graph->get_length(handle);
+                depth_node_counts[t][coverage] += 1;
+            
+                if (!ref && !ref_sample.empty()) {
+                    // update the nonref coverage 
+                    int64_t coverage = sample_set.size();
+                    if (depth_base_counts_nonref[t].size() <= coverage) {
+                        depth_base_counts_nonref[t].resize(coverage + 1, 0);
+                        depth_node_counts_nonref[t].resize(coverage + 1, 0);
+                    }
+                    depth_base_counts_nonref[t][coverage] += graph->get_length(handle);
+                    depth_node_counts_nonref[t][coverage] += 1;            
+                }
+            },
+            true);
+    }
+    
+    if (progress) {
+        cerr << "[count-vg-hap-depth]: Merging data from different threads" << endl;
+    }
+
+    // merge up the threads
+    for (int64_t t = 1; t < get_thread_count(); ++t) {
+        for (int64_t coverage = 0; coverage < depth_base_counts[t].size(); ++coverage) {
+            if (depth_base_counts[0].size() <= coverage) {
+                depth_base_counts[0].resize(coverage + 1, 0);
+                depth_node_counts[0].resize(coverage + 1, 0);
+            }
+            depth_base_counts[0][coverage] += depth_base_counts[t][coverage];
+            depth_node_counts[0][coverage] += depth_node_counts[t][coverage];
+
+            if (!ref_sample.empty()) {
+                if (depth_base_counts_nonref[0].size() <= coverage) {
+                    depth_base_counts_nonref[0].resize(coverage + 1, 0);
+                    depth_node_counts_nonref[0].resize(coverage + 1, 0);
+                }
+                if (coverage < depth_base_counts_nonref[t].size()) {
+                    depth_base_counts_nonref[0][coverage] += depth_base_counts_nonref[t][coverage];
+                    depth_node_counts_nonref[0][coverage] += depth_node_counts_nonref[t][coverage];                
+                }
+            }
+        }
+    }
+
+    // print the results
+    cout << "hap-depth\tnodes\tbases";
+    if (!ref_sample.empty()) {
+        cout << "\tnonref-nodes\tnonref-bases";
+    }
+    cout << endl;
+
+    for (int64_t coverage = 0; coverage < depth_base_counts[0].size(); ++coverage) {
+        cout << coverage << "\t" << depth_node_counts[0][coverage] << "\t" << depth_base_counts[0][coverage];
+        if (!ref_sample.empty()) {
+            cout << "\t" << depth_node_counts_nonref[0][coverage] << "\t" << depth_base_counts_nonref[0][coverage];
+        }
+        cout << "\n";
+    }
+    
+    return 0;
+}

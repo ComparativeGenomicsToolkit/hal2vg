@@ -2,7 +2,7 @@
 rootPath = ./
 include ./include.mk
 
-all : hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip filter-paf-deletions
+all : hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip filter-paf-deletions count-vg-hap-cov
 
 # Note: hdf5 from apt doesn't seem to work for static builds.  It should be installed
 # from source and configured with "--enable-static --disable-shared", then have its
@@ -43,10 +43,14 @@ ifeq ($(shell ldd filter-paf-deletions | grep "not a dynamic" | wc -l), $(shell 
 else
 	$(error ldd found dnymaic linked dependency in filter-paf-deletions)
 endif
-
+ifeq ($(shell ldd count-vg-hap-cov | grep "not a dynamic" | wc -l), $(shell ls count-vg-hap-cov | wc -l))
+	$(info ldd verified that count-vg-hap-cov static)
+else
+	$(error ldd found dnymaic linked dependency in count-vg-hap-cov)
+endif
 
 cleanFast : 
-	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o filter-paf-deletions filter-paf-deletions.o
+	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o filter-paf-deletions filter-paf-deletions.o count-vg-hap-cov.o count-vg-hap-cov
 
 clean :
 	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o filter-paf-deletions filter-paf-deletions.o
@@ -102,6 +106,12 @@ filter-paf-deletions.o : filter-paf-deletions.cpp subpaths.h paf.hpp ${basicLibs
 
 filter-paf-deletions : filter-paf-deletions.o ${basicLibsDependencies} 
 	${cpp} ${CXXFLAGS} -fopenmp -pthread filter-paf-deletions.o  ${basicLibs}  -o filter-paf-deletions
+
+count-vg-hap-cov.o : count-vg-hap-cov.cpp ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -I . count-vg-hap-cov.cpp -c
+
+count-vg-hap-cov : count-vg-hap-cov.o ${basicLibsDependencies}
+	${cpp} ${CXXFLAGS} -fopenmp -pthread count-vg-hap-cov.o  ${basicLibs}  -o count-vg-hap-cov
 
 test :
 	make
