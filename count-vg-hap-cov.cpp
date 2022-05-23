@@ -55,7 +55,8 @@ void help(char** argv) {
        << "    -r, --reference           Include counts of nodes that are not present in the given reference sample prefix" << endl
        << "    -i, --ignore              Completely ignore all paths with given prefix [default: _MINIGRAPH_]" << endl
        << "    -t, --threads             Number of threads [default: all]" << endl
-       << "    -p, --progress            Print progress" << endl      
+       << "    -s, --separator           Use this separator for tokenizing path name. Haplotype key will be first 2 tokens (or all tokens if fewer than 2) [default=.]" << endl
+       << "    -p, --progress            Print progress" << endl 
        << endl;
 }    
 
@@ -63,13 +64,14 @@ void help(char** argv) {
 // todo: vg/bdsg in progress of adpoting conventions / api
 // to manage stuff like this -- should switch to using that
 const string& get_sample_name(const PathHandleGraph* graph, path_handle_t path_handle,
-                              unordered_map<path_handle_t, string>& name_map) {
+                              unordered_map<path_handle_t, string>& name_map,
+                              char separator) {
     if (!name_map.count(path_handle)) {
         string path_name = graph->get_path_name(path_handle);
         string sample;
         int dots = 0;
         for (int64_t i = 0; i < path_name.length(); ++i) {
-            if (path_name[i] == '.') {
+            if (path_name[i] == separator) {
                 ++dots;
             }
             if (dots == 2) {
@@ -86,6 +88,7 @@ int main(int argc, char** argv) {
 
     string ref_sample;
     string ignore_sample = "_MINIGRAPH_";
+    char separator = '.';
     bool progress = false;
     
     int c;
@@ -96,6 +99,7 @@ int main(int argc, char** argv) {
             {"help", no_argument, 0, 'h'},
             {"ref-sample", required_argument, 0, 'r'},
             {"ignore", required_argument, 0, 'i'},
+            {"separator", required_argument, 0, 's'},
             {"threads", required_argument, 0, 't'},
             {"progress", no_argument, 0, 'p'},            
             {0, 0, 0, 0}
@@ -103,7 +107,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hr:t:p",
+        c = getopt_long (argc, argv, "hr:s:i:t:p",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -114,6 +118,13 @@ int main(int argc, char** argv) {
         {
         case 'r':
             ref_sample = optarg;
+            break;
+        case 'i':
+            ignore_sample = optarg;
+            break;
+        case 's':
+            assert(strlen(optarg) == 1);
+            separator = optarg[0];
             break;
         case 't':
             {
@@ -185,7 +196,7 @@ int main(int argc, char** argv) {
                 set<string> sample_set;
                 bool ref = false;
                 graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle) {
-                        const string& sample_name = get_sample_name(graph.get(), graph->get_path_handle_of_step(step_handle), name_maps[t]);
+                        const string& sample_name = get_sample_name(graph.get(), graph->get_path_handle_of_step(step_handle), name_maps[t], separator);
                         if (ignore_sample.empty() || sample_name.compare(0, ignore_sample.length(), ignore_sample) != 0) {
                             if (!ref && sample_name.compare(0, ref_sample.length(), ref_sample) == 0) {
                                 ref = true;
