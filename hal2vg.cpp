@@ -30,8 +30,8 @@ using namespace handlegraph;
 
 static void initParser(CLParser* optionsParser) {
     optionsParser->addArgument("halFile", "input hal file");
-    optionsParser->addOption("refGenome",
-                             "if specifed, treat this genome as a reference path and all others as haplotype paths (by default all are generic)",
+    optionsParser->addOption("refGenomes",
+                             "comma-separated (no spaces) genomes to treat as reference paths with all others as haplotype paths (default=all genomes)",
                              "\"\"");
     optionsParser->addOption("rootGenome", 
                              "process only genomes in clade with specified root"
@@ -87,7 +87,7 @@ static void pinch_to_handle(const Genome* genome,
                             const unordered_map<string, int64_t>& nameToID,
                             unordered_map<stPinchBlock*, nid_t>& blockToNode,
                             MutablePathMutableHandleGraph& graph,
-                            const string& refGenomeName);
+                            const vector<string>& refNames);
 
 static void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength);
 
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     CLParser optionsParser;
     initParser(&optionsParser);
     string halPath;
-    string refGenomeName;
+    string refGenomes;
     string rootGenomeName;
     string targetGenomes;
     bool noAncestors;
@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
     try {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
-        refGenomeName = optionsParser.getOption<string>("refGenome");        
+        refGenomes = optionsParser.getOption<string>("refGenomes");
         rootGenomeName = optionsParser.getOption<string>("rootGenome");
         targetGenomes = optionsParser.getOption<string>("targetGenomes");
         noAncestors = optionsParser.getFlag("noAncestors");
@@ -136,6 +136,12 @@ int main(int argc, char** argv) {
         AlignmentConstPtr alignment(openHalAlignment(halPath, &optionsParser));
         if (alignment->getNumGenomes() == 0) {
             throw hal_exception("input hal alignmenet is empty");
+        }
+
+        vector<string> refNames;
+        if (refGenomes != "\"\"") {
+            refNames = chopString(refGenomes, ",");
+            std::sort(refNames.begin(), refNames.end());
         }
 
         // default to alignment root if none specified
@@ -344,7 +350,7 @@ int main(int argc, char** argv) {
                     cerr << "converting " << genomeName << " with " << genome->getNumSequences()
                          << " sequences and total length " << genome->getSequenceLength() << endl;
                 }
-                pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, refGenomeName);
+                pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, refNames);
 
                 alignment->closeGenome(genome);
             }
@@ -628,12 +634,15 @@ void pinch_to_handle(const Genome* genome,
                      const unordered_map<string, int64_t>& nameToID,
                      unordered_map<stPinchBlock*, nid_t>& blockToNode,
                      MutablePathMutableHandleGraph& graph,
-                     const string& refGenomeName) {
+                     const vector<string>& refNames) {
 
     // iterate over the sequences of the genome
     for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
         const Sequence *sequence = seqIt->getSequence();
-        PathSense sense = refGenomeName.empty() ? PathSense::GENERIC : genome->getName() == refGenomeName ? PathSense::REFERENCE : PathSense::HAPLOTYPE;
+        PathSense sense = PathSense::REFERENCE;
+        if (!refNames.empty() && !std::binary_search(refNames.begin(), refNames.end(), genome->getName())) {
+            sense = PathSense::HAPLOTYPE;
+        }
         int64_t seqID = nameToID.find(sequence->getFullName())->second;
         stPinchThread* thread = stPinchThreadSet_getThread(threadSet, seqID);
 
@@ -644,7 +653,9 @@ void pinch_to_handle(const Genome* genome,
         subrange_t subpath = resolve_subpath_naming(parsed_name);
         string parsed_genome_name = genome->getName();
         size_t haplotype = resolve_haplotype_naming(parsed_genome_name);
-        
+        if (sense == PathSense::HAPLOTYPE && haplotype == PathMetadata::NO_HAPLOTYPE) {
+            haplotype = 0;
+        }
         // create the path
         path_handle_t pathHandle = graph.create_path(sense,
                                                      parsed_genome_name,
@@ -813,7 +824,7 @@ subrange_t resolve_subpath_naming(string& path_name) {
 }
 
 size_t resolve_haplotype_naming(string& genome_name) {
-    size_t haplotype = 0;
+    size_t haplotype = PathMetadata::NO_HAPLOTYPE;
     size_t dp = genome_name.rfind(".");
     if (dp != string::npos) {
         try {
