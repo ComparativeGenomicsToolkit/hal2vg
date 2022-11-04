@@ -67,48 +67,19 @@ static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_interva
     const unordered_map<string, vector<pair<int64_t, int64_t>>>& input_intervals,
     const unordered_map<string, vector<pair<int64_t, int64_t>>>& output_intervals);
 
-// from path.cpp in vg
-// Check if using subpath naming scheme.  If it is return true,
-// the root path name, and the offset (false otherwise)
-// formats accepted:
-// name[start]  (0-based)
-// name[start-end] (0-based, open-ended like BED, end defaults to 0 in above case)
-static tuple<bool, string, size_t, size_t>parse_subpath_name(const string& path_name) {
-    size_t tag_offset = path_name.rfind("[");
-    if (tag_offset == string::npos || tag_offset + 2 >= path_name.length() || path_name.back() != ']') {
-        return make_tuple(false, "", 0, 0);
-    } else {
-        string offset_str = path_name.substr(tag_offset + 1, path_name.length() - tag_offset - 2);
-        size_t sep_offset = offset_str.find("-");
-        string end_offset_str;
-        if (sep_offset != string::npos && !offset_str.empty() && sep_offset < offset_str.length() - 1) {
-            end_offset_str = offset_str.substr(sep_offset + 1, offset_str.length() - sep_offset - 1);
-            offset_str = offset_str.substr(0, sep_offset);
-        }
-        size_t offset_val;
-        size_t end_offset_val = 0;
-        try {
-           offset_val = std::stol(offset_str);
-           if (!end_offset_str.empty()) {
-               end_offset_val = std::stol(end_offset_str);
-           }
-        } catch(...) {
-            return make_tuple(false, "", 0, 0);
-        }
-        return make_tuple(true, path_name.substr(0, tag_offset), offset_val, end_offset_val);
-    }
-}
-
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
-    tuple<bool, string, size_t, size_t> parsed_name = parse_subpath_name(path_name);
-    size_t cur_offset = 0;
-    const string* cur_name = &path_name;
-    if (get<0>(parsed_name)) {
-        cur_offset = get<2>(parsed_name);
-        cur_name = &get<1>(parsed_name);
-    }
-    return *cur_name + "[" + std::to_string(cur_offset + offset) + "-" + std::to_string(cur_offset + offset + length) + "]";
+    PathSense sense;
+    string sample;
+    string locus;
+    size_t haplotype;
+    size_t phase_block;
+    subrange_t subrange;
+    PathMetadata::parse_path_name(path_name, sense, sample, locus, haplotype, phase_block, subrange);
+    subrange.first = subrange != PathMetadata::NO_SUBRANGE ? subrange.first : 0;
+    subrange.first += offset;
+    subrange.second = subrange.first + length;
+    return PathMetadata::create_path_name(sense, sample, locus, haplotype, phase_block, subrange);
 }
 
 int main(int argc, char** argv) {
@@ -1027,15 +998,12 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const P
     unordered_map<string, vector<pair<int64_t, int64_t>>> path_intervals;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
-            tuple<bool, string, size_t, size_t> subpath_info = parse_subpath_name(path_name);
             size_t path_len = 0;
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     path_len += graph->get_length(graph->get_handle_of_step(step_handle));
                 });
-            int64_t start = get<0>(subpath_info) ? get<2>(subpath_info) : 0;
-            if (get<0>(subpath_info)) {
-                path_name = get<1>(subpath_info);
-            }
+            subrange_t path_range = graph->get_subrange(path_handle);
+            int64_t start = path_range == PathMetadata::NO_SUBRANGE ? 0 : path_range.second;
             vector<pair<int64_t, int64_t>>& intervals = path_intervals[path_name];        
             intervals.push_back(make_pair(start, start + path_len));
         });
