@@ -320,9 +320,11 @@ int main(int argc, char** argv) {
 
     if (!out_bed_path.empty()) {
         unordered_map<string, vector<pair<int64_t, int64_t>>> output_graph_intervals = get_path_intervals(graph.get());
+#ifdef debug
         for (const auto& xx : output_graph_intervals) {
             cerr << " got output intervals " << xx.first << " count = " << xx.second.size() << endl;
         }
+#endif
         unordered_map<string, vector<pair<int64_t, int64_t>>> clipped_graph_intervals = get_clipped_intervals(input_graph_intervals, output_graph_intervals);
         ofstream out_bed_file(out_bed_path);
         size_t icount = 0;
@@ -1061,9 +1063,13 @@ static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_interva
         if (!output_intervals.count(path_name)) {
             // path doesn't appear in output -> everything was clipped
             clipped_intervals[path_name].insert(clipped_intervals[path_name].end(), in_intervals.begin(), in_intervals.end());
+#ifdef debug
             cerr << "clippin everything for " << path_name << endl;
+#endif
         } else {
+#ifdef debug
             cerr << "doin frag clip for " << path_name << endl;
+#endif
             const auto& out_intervals = output_intervals.at(path_name);
             // note: clipping here is fairly simple because output intervals are a subset
             // and nothing overlaps

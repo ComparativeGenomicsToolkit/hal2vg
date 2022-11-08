@@ -164,8 +164,10 @@ int main(int argc, char** argv) {
 
     // depth stats (one per thread)
     vector<vector<int64_t>> depth_base_counts(get_thread_count());
+    vector<vector<int64_t>> depth_nfree_base_counts(get_thread_count());
     vector<vector<int64_t>> depth_node_counts(get_thread_count());
     vector<vector<int64_t>> depth_base_counts_nonref(get_thread_count());
+    vector<vector<int64_t>> depth_nfree_base_counts_nonref(get_thread_count());    
     vector<vector<int64_t>> depth_node_counts_nonref(get_thread_count());    
 
     // do counts for each graph arg
@@ -209,19 +211,31 @@ int main(int argc, char** argv) {
                 if (depth_base_counts[t].size() <= coverage) {
                     depth_base_counts[t].resize(coverage + 1, 0);
                     depth_node_counts[t].resize(coverage + 1, 0);
+                    depth_nfree_base_counts[t].resize(coverage + 1, 0);
                 }
-                depth_base_counts[t][coverage] += graph->get_length(handle);
+                int64_t node_len = graph->get_length(handle);
+                int64_t num_ns = 0;
+                string node_seq = graph->get_sequence(handle);
+                for (auto c : node_seq) {
+                    if (c == 'N' || c == 'n') {
+                        ++num_ns;
+                    }
+                }
+                depth_base_counts[t][coverage] += node_len;
+                depth_nfree_base_counts[t][coverage] += node_len - num_ns;
                 depth_node_counts[t][coverage] += 1;
-            
+                            
                 if (!ref && !ref_sample.empty()) {
                     // update the nonref coverage 
                     int64_t coverage = sample_set.size();
                     if (depth_base_counts_nonref[t].size() <= coverage) {
                         depth_base_counts_nonref[t].resize(coverage + 1, 0);
                         depth_node_counts_nonref[t].resize(coverage + 1, 0);
+                        depth_nfree_base_counts_nonref[t].resize(coverage + 1, 0);
                     }
-                    depth_base_counts_nonref[t][coverage] += graph->get_length(handle);
-                    depth_node_counts_nonref[t][coverage] += 1;            
+                    depth_base_counts_nonref[t][coverage] += node_len;
+                    depth_nfree_base_counts_nonref[t][coverage] += node_len - num_ns;                    
+                    depth_node_counts_nonref[t][coverage] += 1;
                 }
             },
             true);
@@ -236,18 +250,22 @@ int main(int argc, char** argv) {
         for (int64_t coverage = 0; coverage < depth_base_counts[t].size(); ++coverage) {
             if (depth_base_counts[0].size() <= coverage) {
                 depth_base_counts[0].resize(coverage + 1, 0);
+                depth_nfree_base_counts[0].resize(coverage + 1, 0);
                 depth_node_counts[0].resize(coverage + 1, 0);
             }
             depth_base_counts[0][coverage] += depth_base_counts[t][coverage];
+            depth_nfree_base_counts[0][coverage] += depth_nfree_base_counts[t][coverage];
             depth_node_counts[0][coverage] += depth_node_counts[t][coverage];
 
             if (!ref_sample.empty()) {
                 if (depth_base_counts_nonref[0].size() <= coverage) {
                     depth_base_counts_nonref[0].resize(coverage + 1, 0);
+                    depth_nfree_base_counts_nonref[0].resize(coverage + 1, 0);
                     depth_node_counts_nonref[0].resize(coverage + 1, 0);
                 }
                 if (coverage < depth_base_counts_nonref[t].size()) {
                     depth_base_counts_nonref[0][coverage] += depth_base_counts_nonref[t][coverage];
+                    depth_nfree_base_counts_nonref[0][coverage] += depth_nfree_base_counts_nonref[t][coverage];
                     depth_node_counts_nonref[0][coverage] += depth_node_counts_nonref[t][coverage];                
                 }
             }
@@ -278,36 +296,40 @@ int main(int argc, char** argv) {
     // cumulate from 0
     vector<int64_t> node_counts_cumul = get_cumul(depth_node_counts[0]);
     vector<int64_t> base_counts_cumul = get_cumul(depth_base_counts[0]);
+    vector<int64_t> nfree_base_counts_cumul = get_cumul(depth_nfree_base_counts[0]);    
     vector<int64_t> node_counts_nonref_cumul = get_cumul(depth_node_counts_nonref[0]);
     vector<int64_t> base_counts_nonref_cumul = get_cumul(depth_base_counts_nonref[0]);
+    vector<int64_t> nfree_base_counts_nonref_cumul = get_cumul(depth_nfree_base_counts_nonref[0]);
 
     //cumulate from end
     vector<int64_t> node_counts_lumuc = get_lumuc(depth_node_counts[0]);
     vector<int64_t> base_counts_lumuc = get_lumuc(depth_base_counts[0]);
+    vector<int64_t> nfree_base_counts_lumuc = get_lumuc(depth_nfree_base_counts[0]);
     vector<int64_t> node_counts_nonref_lumuc = get_lumuc(depth_node_counts_nonref[0]);
     vector<int64_t> base_counts_nonref_lumuc = get_lumuc(depth_base_counts_nonref[0]);
+    vector<int64_t> nfree_base_counts_nonref_lumuc = get_lumuc(depth_nfree_base_counts_nonref[0]);
 
     // print the results
     cout << "hap-depth"
-         << "\t" << "nodes" << "\t" << "bases"
-         << "\t" << "nodes-cumul" << "\t" <<"bases-cumul"
-         << "\t" << "nodes-cumul-rev" << "\t" << "bases-cumul-rev";
+         << "\t" << "nodes" << "\t" << "bases" << "\t" << "non-n-bases"
+         << "\t" << "nodes-cumul" << "\t" <<"bases-cumul" << "\t" << "non-n-bases-cumul"
+         << "\t" << "nodes-cumul-rev" << "\t" << "bases-cumul-rev" << "\t" << "non-n-bases-cumul-rev";
     if (!ref_sample.empty()) {
-        cout << "\t" << "nodes-nonref" << "\t" << "bases-nonref"
-             << "\t" << "nodes-cumul-nonref" << "\t" << "bases-cumul-nonref"
-             << "\t" << "nodes-cumul-rev-nonref" << "\t" << "bases-cumul-rev-nonref";
+        cout << "\t" << "nodes-nonref" << "\t" << "bases-nonref" << "\t" << "non-n-bases-nonref"
+             << "\t" << "nodes-cumul-nonref" << "\t" << "bases-cumul-nonref" << "\t" << "non-n-bases-cumul-nonref"
+             << "\t" << "nodes-cumul-rev-nonref" << "\t" << "bases-cumul-rev-nonref" << "\t" << "non-n-bases-cumul-rev-nonref";
     }
     cout << endl;
 
     for (int64_t coverage = 0; coverage < depth_base_counts[0].size(); ++coverage) {        
         cout << coverage
-             << "\t" << depth_node_counts[0][coverage] << "\t" << depth_base_counts[0][coverage]
-             << "\t" << node_counts_cumul[coverage] << "\t" << base_counts_cumul[coverage]
-             << "\t" << node_counts_lumuc[coverage] << "\t" << base_counts_lumuc[coverage];
+             << "\t" << depth_node_counts[0][coverage] << "\t" << depth_base_counts[0][coverage] << "\t" << depth_nfree_base_counts[0][coverage]
+             << "\t" << node_counts_cumul[coverage] << "\t" << base_counts_cumul[coverage] << "\t" << nfree_base_counts_cumul[coverage]
+             << "\t" << node_counts_lumuc[coverage] << "\t" << base_counts_lumuc[coverage] << "\t" << nfree_base_counts_lumuc[coverage];
         if (!ref_sample.empty()) {
-            cout << "\t" << depth_node_counts_nonref[0][coverage] << "\t" << depth_base_counts_nonref[0][coverage]
-                 << "\t" << node_counts_nonref_cumul[coverage] << "\t" << base_counts_nonref_cumul[coverage]
-                 << "\t" << node_counts_nonref_lumuc[coverage] << "\t" << base_counts_nonref_lumuc[coverage];
+            cout << "\t" << depth_node_counts_nonref[0][coverage] << "\t" << depth_base_counts_nonref[0][coverage] << "\t" << depth_nfree_base_counts_nonref[0][coverage]
+                 << "\t" << node_counts_nonref_cumul[coverage] << "\t" << base_counts_nonref_cumul[coverage] << "\t" << nfree_base_counts_nonref_cumul[coverage]
+                 << "\t" << node_counts_nonref_lumuc[coverage] << "\t" << base_counts_nonref_lumuc[coverage] << "\t" << nfree_base_counts_nonref_lumuc[coverage];
         }
         cout << "\n";
     }
