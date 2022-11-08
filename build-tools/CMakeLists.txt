@@ -35,7 +35,38 @@ endif()
 set (CMAKE_INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
 
 add_library(handlegraph_objs OBJECT
-  src/handle.cpp
+  src/deletable_handle_graph.cpp
+  src/handle_graph.cpp
+  src/mutable_handle_graph.cpp
+  src/path_metadata.cpp
+  src/mutable_path_metadata.cpp 
+  src/path_handle_graph.cpp 
+  src/path_position_handle_graph.cpp
+  src/mutable_path_handle_graph.cpp
+  src/ranked_handle_graph.cpp
+  src/serializable.cpp
+  src/snarl_decomposition.cpp
+  src/trivially_serializable.cpp
+  src/types.cpp
+  src/copy_graph.cpp
+  src/append_graph.cpp
+  src/are_equivalent.cpp
+  src/find_tips.cpp
+  src/topological_sort.cpp
+  src/apply_orientations.cpp
+  src/is_single_stranded.cpp
+  src/count_walks.cpp
+  src/eades_algorithm.cpp
+  src/dagify.cpp
+  src/strongly_connected_components.cpp
+  src/find_shortest_paths.cpp
+  src/dijkstra.cpp
+  src/is_acyclic.cpp
+  src/reverse_complement.cpp
+  src/split_strands.cpp
+  src/chop.cpp
+  src/weakly_connected_components.cpp
+  src/extend.cpp
   src/include/handlegraph/handle_graph.hpp
   src/include/handlegraph/mutable_handle_graph.hpp
   src/include/handlegraph/deletable_handle_graph.hpp
@@ -48,6 +79,25 @@ add_library(handlegraph_objs OBJECT
   src/include/handlegraph/util.hpp
   src/include/handlegraph/types.hpp
   src/include/handlegraph/iteratee.hpp
+  src/include/handlegraph/algorithms/copy_graph.hpp
+  src/include/handlegraph/algorithms/append_graph.hpp
+  src/include/handlegraph/algorithms/are_equivalent.hpp
+  src/include/handlegraph/algorithms/find_tips.hpp
+  src/include/handlegraph/algorithms/topological_sort.hpp
+  src/include/handlegraph/algorithms/apply_orientations.hpp
+  src/include/handlegraph/algorithms/is_single_stranded.hpp
+  src/include/handlegraph/algorithms/count_walks.hpp
+  src/include/handlegraph/algorithms/eades_algorithm.hpp
+  src/include/handlegraph/algorithms/dagify.hpp
+  src/include/handlegraph/algorithms/strongly_connected_components.hpp
+  src/include/handlegraph/algorithms/find_shortest_paths.hpp
+  src/include/handlegraph/algorithms/dijkstra.hpp
+  src/include/handlegraph/algorithms/reverse_complement.hpp
+  src/include/handlegraph/algorithms/is_acyclic.hpp
+  src/include/handlegraph/algorithms/split_strands.hpp
+  src/include/handlegraph/algorithms/chop.hpp
+  src/include/handlegraph/algorithms/weakly_connected_components.hpp
+  src/include/handlegraph/algorithms/extend.hpp
   )
 
 # Use the include directory when building the objects.
