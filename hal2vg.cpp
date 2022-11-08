@@ -30,6 +30,9 @@ using namespace handlegraph;
 
 static void initParser(CLParser* optionsParser) {
     optionsParser->addArgument("halFile", "input hal file");
+    optionsParser->addOption("refGenomes",
+                             "comma-separated (no spaces) genomes to treat as reference paths with all others as haplotype paths (default=all genomes)",
+                             "\"\"");
     optionsParser->addOption("rootGenome", 
                              "process only genomes in clade with specified root"
                              " (HAL root if empty)", 
@@ -44,11 +47,6 @@ static void initParser(CLParser* optionsParser) {
     optionsParser->addOption("ignoreGenomes",
                              "comma-separated (no spaces) list of genomes to ignore",
                              "\"\"");
-    optionsParser->addOptionFlag("onlySequenceNames",
-                                 "use only sequence names for output names.  By "
-                                 "default, the UCSC convention of "
-                                 "Genome.Sequence is used",
-                                 false);
     optionsParser->addOption("outputFormat",
                              "output graph format in {pg, hg, odgi} [default=pg]",
                              "pg");
@@ -65,20 +63,17 @@ static void initParser(CLParser* optionsParser) {
 static void add_genome_threads(const Genome* genome,
                                stPinchThreadSet* threads,
                                vector<string>& IDToName,
-                               unordered_map<string, int64_t>& nameToID,
-                               bool fullNames);
+                               unordered_map<string, int64_t>& nameToID);
 
 static void pinch_genome(const Genome* genome,
                          stPinchThreadSet* threads,
                          unordered_map<string, int64_t>& nameToID,
-                         bool fullNames,
                          const vector<string>& targetNames,
                          unordered_map<stPinchThread*, vector<bool>>& snp_cache);
 
 static void pinch_snp(const Genome* genome,
                       stPinchThreadSet* threads,
                       unordered_map<string, int64_t>& nameToID,
-                      bool fullNames,
                       const TopSegmentIteratorPtr& topIt,
                       int64_t topOffset,
                       ColumnIteratorPtr& colIt,
@@ -92,32 +87,34 @@ static void pinch_to_handle(const Genome* genome,
                             const unordered_map<string, int64_t>& nameToID,
                             unordered_map<stPinchBlock*, nid_t>& blockToNode,
                             MutablePathMutableHandleGraph& graph,
-                            bool fullNames);
+                            const vector<string>& refNames);
 
 static void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength);
 
-static void resolve_subpath_naming(string& path_name);
+static subrange_t resolve_subpath_naming(string& path_name);
+
+static size_t resolve_haplotype_naming(string& genome_name);
 
 int main(int argc, char** argv) {
     CLParser optionsParser;
     initParser(&optionsParser);
     string halPath;
+    string refGenomes;
     string rootGenomeName;
     string targetGenomes;
     bool noAncestors;
     string ignoreGenomes;
-    bool fullNames;
     string outputFormat;
     size_t maxNodeLength;
     bool progress;
     try {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
+        refGenomes = optionsParser.getOption<string>("refGenomes");
         rootGenomeName = optionsParser.getOption<string>("rootGenome");
         targetGenomes = optionsParser.getOption<string>("targetGenomes");
         noAncestors = optionsParser.getFlag("noAncestors");
         ignoreGenomes = optionsParser.getOption<string>("ignoreGenomes");
-        fullNames = !optionsParser.getFlag("onlySequenceNames");
         outputFormat = optionsParser.getOption<string>("outputFormat");
         if (outputFormat != "pg" && outputFormat != "hg" && outputFormat != "odgi") {
             throw hal_exception("--outputFormat must be one of {pg, hg, odgi}");
@@ -139,6 +136,12 @@ int main(int argc, char** argv) {
         AlignmentConstPtr alignment(openHalAlignment(halPath, &optionsParser));
         if (alignment->getNumGenomes() == 0) {
             throw hal_exception("input hal alignmenet is empty");
+        }
+
+        vector<string> refNames;
+        if (refGenomes != "\"\"") {
+            refNames = chopString(refGenomes, ",");
+            std::sort(refNames.begin(), refNames.end());
         }
 
         // default to alignment root if none specified
@@ -261,7 +264,7 @@ int main(int argc, char** argv) {
                 if (progress && !(!curParent.empty() && genomeName != rootGenomeName)) {
                     cerr << "adding threads from " << genome->getName() << endl;
                 }
-                add_genome_threads(genome, threadSet, IDToName, nameToID, fullNames);
+                add_genome_threads(genome, threadSet, IDToName, nameToID);
             }
 
             if (!ignoreGenome && !curParent.empty() && genomeName != rootGenomeName) {
@@ -302,7 +305,7 @@ int main(int argc, char** argv) {
             if (progress) {
                 cerr << "pinching " << pinchGenomes[i] << endl;
             }
-            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID, fullNames, targetNames, snp_cache);
+            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID, targetNames, snp_cache);
         }
         snp_cache.clear();
 
@@ -347,7 +350,7 @@ int main(int argc, char** argv) {
                     cerr << "converting " << genomeName << " with " << genome->getNumSequences()
                          << " sequences and total length " << genome->getSequenceLength() << endl;
                 }
-                pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, fullNames);
+                pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, refNames);
 
                 alignment->closeGenome(genome);
             }
@@ -388,15 +391,14 @@ int main(int argc, char** argv) {
 
 // Add every sequence from the genome into the pinch graph
 void add_genome_threads(const Genome* genome,
-                       stPinchThreadSet* threads,
-                       vector<string>& IDToName,
-                       unordered_map<string, int64_t>& nameToID,
-                       bool fullNames) {
+                        stPinchThreadSet* threads,
+                        vector<string>& IDToName,
+                        unordered_map<string, int64_t>& nameToID) {
     
     for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
         const Sequence *sequence = seqIt->getSequence();
         hal_size_t seqLen = sequence->getSequenceLength();
-        string name = fullNames ? sequence->getFullName() : sequence->getName();
+        string name = sequence->getFullName();
         // update lookups to map hal sequence to numeric id
         int64_t seqID = IDToName.size(); 
         nameToID[name] = seqID;
@@ -413,7 +415,6 @@ void add_genome_threads(const Genome* genome,
 void pinch_genome(const Genome* genome,
                   stPinchThreadSet* threads,
                   unordered_map<string, int64_t>& nameToID,
-                  bool fullNames,
                   const vector<string>& targetNames,
                   unordered_map<stPinchThread*, vector<bool>>& snp_cache) {
 
@@ -451,8 +452,8 @@ void pinch_genome(const Genome* genome,
             botIt->toParent(topIt);
 
             // todo: lots of string lookups
-            int64_t topID = nameToID[fullNames ? topIt->tseg()->getSequence()->getFullName() : topIt->tseg()->getSequence()->getName()];
-            int64_t botID = nameToID[fullNames ? botIt->bseg()->getSequence()->getFullName() : botIt->bseg()->getSequence()->getName()];
+            int64_t topID = nameToID[topIt->tseg()->getSequence()->getFullName()];
+            int64_t botID = nameToID[botIt->bseg()->getSequence()->getFullName()];
 
             if (topIt->tseg()->getSequence() != topSeq) {
                 topSeq = topIt->tseg()->getSequence();
@@ -483,7 +484,7 @@ void pinch_genome(const Genome* genome,
                     }
                     last_match = i;
                 } else if (colIt.get() != NULL) {
-                    pinch_snp(genome, threads, nameToID, fullNames, topIt, i, colIt,
+                    pinch_snp(genome, threads, nameToID, topIt, i, colIt,
                               std::toupper(topString[i]), topThread, snp_cache);
                 }
                 if (std::toupper(topString[i]) != std::toupper(botString[i]) || i == (int64_t)topString.length() - 1) {
@@ -565,7 +566,6 @@ void pinch_genome(const Genome* genome,
 void pinch_snp(const Genome* genome,
                stPinchThreadSet* threads,
                unordered_map<string, int64_t>& nameToID,
-               bool fullNames,
                const TopSegmentIteratorPtr& topIt,
                int64_t topOffset,
                ColumnIteratorPtr& colIt,
@@ -596,7 +596,7 @@ void pinch_snp(const Genome* genome,
         for (ColumnIterator::DNASet::const_iterator dsi = cmi->second->begin(); dsi != cmi->second->end(); ++dsi) {
             char botBase = std::toupper((*dsi)->getBase());
             
-            int64_t otherID = nameToID[fullNames ? sequence->getFullName() : sequence->getName()];
+            int64_t otherID = nameToID[sequence->getFullName()];
             stPinchThread* otherThread = stPinchThreadSet_getThread(threads, otherID);
             hal_index_t otherStart = (*dsi)->getArrayIndex() - sequence->getStartPosition();
 
@@ -634,22 +634,36 @@ void pinch_to_handle(const Genome* genome,
                      const unordered_map<string, int64_t>& nameToID,
                      unordered_map<stPinchBlock*, nid_t>& blockToNode,
                      MutablePathMutableHandleGraph& graph,
-                     bool fullNames) {
+                     const vector<string>& refNames) {
 
     // iterate over the sequences of the genome
     for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
         const Sequence *sequence = seqIt->getSequence();
-        string seqName = fullNames ? sequence->getFullName() : sequence->getName();
-        int64_t seqID = nameToID.find(seqName)->second;
+        PathSense sense = PathSense::REFERENCE;
+        if (!refNames.empty() && !std::binary_search(refNames.begin(), refNames.end(), genome->getName())) {
+            sense = PathSense::HAPLOTYPE;
+        }
+        int64_t seqID = nameToID.find(sequence->getFullName())->second;
         stPinchThread* thread = stPinchThreadSet_getThread(threadSet, seqID);
 
         // cactus_graphmap_split can make paths like contig_sub_1_3.  here we convert that
         // into a format vg can (sometimes) understand contig[1-3].
         // (the reason we go through this is that assembly hubs can't handle any special characters apparently)
-        resolve_subpath_naming(seqName);
-        
+        string parsed_name = sequence->getName();
+        subrange_t subpath = resolve_subpath_naming(parsed_name);
+        string parsed_genome_name = genome->getName();
+        size_t haplotype = resolve_haplotype_naming(parsed_genome_name);
+        if (sense == PathSense::HAPLOTYPE && haplotype == PathMetadata::NO_HAPLOTYPE) {
+            haplotype = 0;
+        }
         // create the path
-        path_handle_t pathHandle = graph.create_path_handle(seqName);
+        path_handle_t pathHandle = graph.create_path(sense,
+                                                     parsed_genome_name,
+                                                     parsed_name,
+                                                     haplotype,
+                                                     sense == PathSense::HAPLOTYPE ? 0 : PathMetadata::NO_PHASE_BLOCK,
+                                                     subpath,
+                                                     false);
         string pathString;
         
         // iterate over the segments of the sequence
@@ -731,7 +745,7 @@ void pinch_to_handle(const Genome* genome,
         string halPathString;
         sequence->getString(halPathString);
         if (pathString.length() != halPathString.length()) {
-            throw runtime_error("Incorrect length in coverted path for " + seqName + ": " + std::to_string(pathString.length()) +
+            throw runtime_error("Incorrect length in coverted path for " + sequence->getFullName() + ": " + std::to_string(pathString.length()) +
                                 ". Should be: " + std::to_string(halPathString.length()));
         }
         vector<size_t> mismatches;
@@ -742,7 +756,7 @@ void pinch_to_handle(const Genome* genome,
         }
         if (!mismatches.empty()) {
             stringstream msg;
-            msg << mismatches.size() << " mismatches found in converted path for " << seqName << ":\n";
+            msg << mismatches.size() << " mismatches found in converted path for " << sequence->getFullName() << ":\n";
             for (size_t i = 0; i < mismatches.size() && i < 10; ++i) {
                 msg << " path[" << mismatches[i] << "]=" << pathString[mismatches[i]] << ". should be " << halPathString[mismatches[i]] << "\n";
             }
@@ -771,9 +785,10 @@ void chop_graph(MutablePathMutableHandleGraph& graph, size_t maxNodeLength) {
     }
 }
 
-void resolve_subpath_naming(string& path_name) {
+subrange_t resolve_subpath_naming(string& path_name) {
     size_t first_length = 0;
     size_t start_offset = 0;
+    bool found_subpath = false;
     while (true) {
         size_t sp = path_name.rfind("_sub_");
         if (sp != string::npos) {
@@ -781,12 +796,8 @@ void resolve_subpath_naming(string& path_name) {
             if (up != string::npos && up > sp + 1) {
                 int64_t start;
                 int64_t end;
-                try {
-                    start = stol(path_name.substr(sp + 5, up - sp - 5));
-                    end = stol(path_name.substr(up + 1));
-                } catch (...) {
-                    return;
-                }
+                start = stol(path_name.substr(sp + 5, up - sp - 5));
+                end = stol(path_name.substr(up + 1));
                 stringstream new_name;
                 start_offset += start; // final offset is sum of all nested offsets
                 if (first_length == 0) {
@@ -797,12 +808,30 @@ void resolve_subpath_naming(string& path_name) {
                     // be derived from the start, plus the length of the "top" path
                     end = start_offset + first_length;
                 }
-                new_name << path_name.substr(0, sp) << "[" << start_offset << "-" << end << "]";
+                new_name << path_name.substr(0, sp);
                 path_name = new_name.str();
+                found_subpath = true;
             }
         } else {
             break;
         }
     }
-    return;
+    if (found_subpath) {
+        return make_pair(start_offset, start_offset + first_length);
+    } else {
+        return PathMetadata::NO_SUBRANGE;
+    }
+}
+
+size_t resolve_haplotype_naming(string& genome_name) {
+    size_t haplotype = PathMetadata::NO_HAPLOTYPE;
+    size_t dp = genome_name.rfind(".");
+    if (dp != string::npos) {
+        try {
+            haplotype = stol(genome_name.substr(dp + 1));
+            genome_name = genome_name.substr(0, dp);
+        } catch(...) {
+        }
+    }
+    return haplotype;
 }
