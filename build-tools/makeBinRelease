@@ -35,7 +35,7 @@ if [ $(man gcc | grep nehalem | wc -l) -ge 1 ]
 then
 	 # attempt to increase portability by using older architecture
 	 # this make/sed/make thing is a hack to get around a linking error that just cropped up
-	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make static -j 8 || true
+	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make static || true
 	 sed -i deps/libbdsg-easy/deps/libbdsg/Makefile -e "s/-lomp//g"	 
 	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make check-static
 else
