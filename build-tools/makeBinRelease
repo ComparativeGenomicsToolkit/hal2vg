@@ -20,7 +20,7 @@ set -x
 rm -rf ${binBuildDir}
 mkdir -p ${binBuildDir}
 cd ${binBuildDir}
-git clone --recursive https://github.com/ComparativeGenomicsToolkit/hal2vg.git
+git clone https://github.com/ComparativeGenomicsToolkit/hal2vg.git
 cd hal2vg
 git fetch --tags origin
 
@@ -34,8 +34,13 @@ cp ./build-tools/CMakeLists.txt ./deps/libbdsg-easy/deps/libhandlegraph/CMakeLis
 if [ $(man gcc | grep nehalem | wc -l) -ge 1 ]
 then
 	 # attempt to increase portability by using older architecture
+	 # this make/sed/make thing is a hack to get around a linking error that just cropped up
+	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make static || true
+	 sed -i deps/libbdsg-easy/deps/libbdsg/Makefile -e "s/-lomp//g"	 
 	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make check-static
 else
+	 make static || true
+	 sed -i deps/libbdsg-easy/deps/libbdsg/Makefile -e "s/-lomp//g"
 	 make check-static
 fi
 
