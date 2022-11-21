@@ -44,6 +44,7 @@ struct PafDelta {
     int64_t prev_ref_end;
     int64_t cur_ref_start;
     int64_t cur_ref_end;
+    int64_t query_len;
 };
     
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
@@ -54,7 +55,8 @@ static unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>> index_deleti
 static pair<vector<PafLine>, unordered_map<int64_t, int64_t>> load_paf(ifstream& paf_file);
 static int64_t for_each_query_block(const vector<PafLine>& paf_lines, const vector<bool>& masking,
                                     function<void(int64_t, int64_t)> visit_block);
-static int64_t check_delta(int64_t max_deletion_threshold, int64_t max_insertion_threshold, const PafDelta& paf_delta, double overlap_threshold);
+static int64_t check_delta(int64_t max_deletion_threshold, int64_t max_insertion_threshold, const PafDelta& paf_delta, double overlap_threshold,
+                           double deletion_size_threshold);
 static PafDelta get_delta(path_handle_t ref_path, const PafLine& prev_paf, const PafLine& cur_paf,
                           const unordered_map<string, nid_t>& mg_to_vg, const unordered_map<nid_t, Anchor>& ref_index,
                           const unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>>& ref_deletions);
@@ -67,14 +69,15 @@ void help(char** argv) {
          << "  <aln.paf> : paf alignment from cactus-graphmap" << endl
          << endl
          << "options: " << endl
-         << "    -d  --del-threshold F     only remove deletions greater than this. if < 1, then interpreted as fraction of reference path size" << endl
-         << "    -i, --ins-threshold F     Like <del-threshold>, but applied to insertions instead of deletions [-1]" << endl
-         << "    -m, --max-filter F        If F*<threshold> matches need to be pulled apart to resolve a single deletion, just leave it alone [1]" << endl
-         << "    -r, --ref-prefix STR      Only consider paths whose names start with STR" << endl
-         << "    -p, --progress            Print progress" << endl
-         << "    -o, --filter-off-ref      Filter mappings that aren't in dominant ref" << endl        
-         << "    -v, --verbose             Print deletions" << endl
-         << "    -t, --threads N           number of threads to use (used only for indexing graph) [default: all available]" << endl
+         << "    -d  --del-threshold F      Only remove deletions greater than this. if < 1, then interpreted as fraction of reference path size" << endl
+         << "    -i, --ins-threshold F      Like <del-threshold>, but applied to insertions instead of deletions [-1]" << endl
+         << "    -m, --max-filter F         If F*<threshold> matches need to be pulled apart to resolve a single deletion, just leave it alone [1]" << endl
+         << "    -s, --del-size-threshold F Remove any deletion if the source contig size is < F*<deletion-size> [-1: disabled]" << endl 
+         << "    -r, --ref-prefix STR       Only consider paths whose names start with STR" << endl
+         << "    -p, --progress             Print progress" << endl
+         << "    -o, --filter-off-ref       Filter mappings that aren't in dominant ref" << endl        
+         << "    -v, --verbose              Print deletions" << endl
+         << "    -t, --threads N            Number of threads to use (used only for indexing graph) [default: all available]" << endl
        << endl;
 }    
 
@@ -90,6 +93,7 @@ int main(int argc, char** argv) {
     double filter_threshold = 1.0;
     double max_insertion = -1.0;
     double max_deletion = -1.0;
+    double deletion_size_threshold = -1.0;
     int c;
     optind = 1; 
     while (true) {
@@ -97,7 +101,8 @@ int main(int argc, char** argv) {
         static const struct option long_options[] = {
             {"del-threshold", required_argument, 0, 'd'},            
             {"ins-threshold", required_argument, 0, 'i'},
-            {"max-filter", required_argument, 0, 'm'},            
+            {"max-filter", required_argument, 0, 'm'},
+            {"del-size-threshold", required_argument, 0, 's'},
             {"ref-prefix", required_argument, 0, 'r'},
             {"filter-off-ref", no_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},            
@@ -109,7 +114,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "d:i:m:r:khpvt:",
+        c = getopt_long (argc, argv, "d:i:m:s:r:khpvt:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -127,6 +132,9 @@ int main(int argc, char** argv) {
         case 'm':
             filter_threshold = stof(optarg);
             break;
+        case 's':
+            deletion_size_threshold = stof(optarg);
+            break;            
         case 'r':
             ref_prefix = optarg;
             break;
@@ -357,7 +365,7 @@ int main(int argc, char** argv) {
                     const PafLine& prev_paf = paf_lines[prev_idx];
                     PafDelta paf_delta = get_delta(ref_path, prev_paf, cur_paf, mg_to_vg, ref_index, ref_deletions);
                     
-                    int64_t checked_delta = check_delta(max_deletion_threshold, max_insertion_threshold, paf_delta, overlap_threshold);
+                    int64_t checked_delta = check_delta(max_deletion_threshold, max_insertion_threshold, paf_delta, overlap_threshold, deletion_size_threshold);
 
                     if (checked_delta != 0) {
                         if (verbose) {
@@ -394,7 +402,8 @@ int main(int argc, char** argv) {
                             const PafLine& prev_paf = paf_lines[k];
                             const PafLine& cur_paf = paf_lines[cut_points[j]];
                             PafDelta paf_delta = get_delta(ref_path, prev_paf, cur_paf, mg_to_vg, ref_index, ref_deletions);
-                            int64_t checked_delta = check_delta(max_deletion_threshold, max_insertion_threshold, paf_delta, overlap_threshold);
+                            int64_t checked_delta = check_delta(max_deletion_threshold, max_insertion_threshold, paf_delta, overlap_threshold,
+                                                                deletion_size_threshold);
                             if (checked_delta == 0) {
                                 backward_candidate = k;
                             } else {
@@ -417,7 +426,8 @@ int main(int argc, char** argv) {
                             int64_t max_deletion_threshold = max_deletion;
                             int64_t max_insertion_threshold = max_insertion;
                             PafDelta paf_delta = get_delta(ref_path, prev_paf, cur_paf, mg_to_vg, ref_index, ref_deletions);
-                            int64_t checked_delta = check_delta(max_deletion_threshold, max_insertion_threshold, paf_delta, overlap_threshold);
+                            int64_t checked_delta = check_delta(max_deletion_threshold, max_insertion_threshold, paf_delta, overlap_threshold,
+                                                                deletion_size_threshold);
                             if (checked_delta == 0) {
                                 forward_candidate = k;
                             } else {
@@ -718,7 +728,7 @@ unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>> index_deletions(con
                     interval.stop = a2.min_offset;
                 } else {
                     interval.start = a2.max_offset;
-                    interval.stop = a1.min_offset;                
+                    interval.stop = a1.min_offset;
                 }
                 interval.value = interval.stop - interval.start;
                 if (interval.value > 1) {
@@ -801,14 +811,17 @@ unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream) {
 }
 
 // return -Delta for insertion, +Delta for deletion and 0 if it doesn't pass thresholds
-int64_t check_delta(int64_t max_deletion_threshold, int64_t max_insertion_threshold, const PafDelta& paf_delta, double overlap_threshold) {
+int64_t check_delta(int64_t max_deletion_threshold, int64_t max_insertion_threshold, const PafDelta& paf_delta, double overlap_threshold,
+                    double deletion_size_threshold) {
     int64_t ret = 0;
     if (paf_delta.delta != 0) {
         // note: paf_delta.delta is ref-query, so deletions are positive and insertions are negative
         if (paf_delta.delta < 0 && max_insertion_threshold > 0 && -paf_delta.delta > max_insertion_threshold) {
             ret = paf_delta.delta;
-        } else if (paf_delta.delta > 0 && max_deletion_threshold > 0 && paf_delta.delta > max_deletion_threshold  &&
-                  abs((double)paf_delta.ref_overlap_size / paf_delta.delta) < overlap_threshold) {
+        } else if (paf_delta.delta > 0 && max_deletion_threshold > 0 &&
+                   (paf_delta.delta > max_deletion_threshold ||
+                    (deletion_size_threshold >= 0 && paf_delta.query_len < deletion_size_threshold * abs(paf_delta.delta)))  &&
+                   abs((double)paf_delta.ref_overlap_size / paf_delta.delta) < overlap_threshold) {
             ret = paf_delta.delta;
         }
     }
@@ -820,7 +833,10 @@ PafDelta get_delta(path_handle_t ref_path, const PafLine& prev_paf, const PafLin
                    const unordered_map<path_handle_t, IntervalTree<int64_t, int64_t>>& ref_deletions) {
     
     PafDelta paf_delta;
-        
+
+    paf_delta.query_len = prev_paf.query_len;
+    assert(paf_delta.query_len == cur_paf.query_len);
+    
     paf_delta.query_delta = cur_paf.query_start - prev_paf.query_end; // not abs because sorted
     
     nid_t prev_target_id = mg_to_vg.at(prev_paf.target_name);
@@ -850,7 +866,7 @@ PafDelta get_delta(path_handle_t ref_path, const PafLine& prev_paf, const PafLin
     paf_delta.delta = paf_delta.ref_delta > 0 ? paf_delta.ref_delta - paf_delta.query_delta : 0;
 
     paf_delta.ref_overlap_size = 0;
-    if (paf_delta.delta > 0) {                     
+    if (paf_delta.delta > 0) {
         if (ref_deletions.count(ref_path)) {
             vector<Interval<int64_t, int64_t>> overlaps = ref_deletions.at(ref_path).findOverlapping(prev_ref_end, cur_ref_start);
             for (const auto& overlap : overlaps) {
