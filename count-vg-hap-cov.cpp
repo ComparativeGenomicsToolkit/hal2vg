@@ -240,6 +240,31 @@ int main(int argc, char** argv) {
             },
             true);
     }
+
+    // make sure all tables have same size
+    size_t max_size = 0;
+    for (int64_t t = 0; t < get_thread_count(); ++t) {
+        max_size = std::max(max_size, depth_base_counts[t].size());
+        max_size = std::max(max_size, depth_base_counts_nonref[t].size());
+    }
+    for (int64_t t = 0; t < get_thread_count(); ++t) {
+        if (depth_base_counts[t].size() < max_size) {
+            depth_base_counts[t].resize(max_size, 0);
+            depth_nfree_base_counts[t].resize(max_size, 0);
+            depth_node_counts[t].resize(max_size, 0);
+        }
+        if (depth_base_counts_nonref[t].size() < max_size) {
+            depth_base_counts_nonref[t].resize(max_size, 0);
+            depth_nfree_base_counts_nonref[t].resize(max_size, 0);
+            depth_node_counts_nonref[t].resize(max_size, 0);
+        }
+        assert(depth_base_counts[t].size() == max_size);
+        assert(depth_nfree_base_counts[t].size() == max_size);
+        assert(depth_node_counts[t].size() == max_size);
+        assert(depth_base_counts_nonref[t].size() == max_size);
+        assert(depth_nfree_base_counts_nonref[t].size() == max_size);
+        assert(depth_node_counts_nonref[t].size() == max_size);
+    }
     
     if (progress) {
         cerr << "[count-vg-hap-depth]: Merging data from different threads" << endl;
@@ -248,26 +273,16 @@ int main(int argc, char** argv) {
     // merge up the threads
     for (int64_t t = 1; t < get_thread_count(); ++t) {
         for (int64_t coverage = 0; coverage < depth_base_counts[t].size(); ++coverage) {
-            if (depth_base_counts[0].size() <= coverage) {
-                depth_base_counts[0].resize(coverage + 1, 0);
-                depth_nfree_base_counts[0].resize(coverage + 1, 0);
-                depth_node_counts[0].resize(coverage + 1, 0);
-            }
+            assert(depth_base_counts[0].size() > coverage);
             depth_base_counts[0][coverage] += depth_base_counts[t][coverage];
             depth_nfree_base_counts[0][coverage] += depth_nfree_base_counts[t][coverage];
             depth_node_counts[0][coverage] += depth_node_counts[t][coverage];
 
             if (!ref_sample.empty()) {
-                if (depth_base_counts_nonref[0].size() <= coverage) {
-                    depth_base_counts_nonref[0].resize(coverage + 1, 0);
-                    depth_nfree_base_counts_nonref[0].resize(coverage + 1, 0);
-                    depth_node_counts_nonref[0].resize(coverage + 1, 0);
-                }
-                if (coverage < depth_base_counts_nonref[t].size()) {
-                    depth_base_counts_nonref[0][coverage] += depth_base_counts_nonref[t][coverage];
-                    depth_nfree_base_counts_nonref[0][coverage] += depth_nfree_base_counts_nonref[t][coverage];
-                    depth_node_counts_nonref[0][coverage] += depth_node_counts_nonref[t][coverage];                
-                }
+                assert(depth_base_counts_nonref[0].size() > coverage);
+                depth_base_counts_nonref[0][coverage] += depth_base_counts_nonref[t][coverage];
+                depth_nfree_base_counts_nonref[0][coverage] += depth_nfree_base_counts_nonref[t][coverage];
+                depth_node_counts_nonref[0][coverage] += depth_node_counts_nonref[t][coverage];                
             }
         }
     }
