@@ -8,8 +8,7 @@ PATH=../deps/hal:$PATH
 
 plan tests 18
 
-#vg convert -g chop/tiny-flat.gfa -p > tiny-flat.vg
-vg convert -g chop/tiny-flat.gfa -o > tiny-flat.vg
+vg convert -g chop/tiny-flat.gfa -p > tiny-flat.vg
 printf "x\t0\t100\n" > all.bed
 clip-vg tiny-flat.vg -b all.bed | vg view - | grep -v ^H > chopped-all.gfa
 is "$(cat chopped-all.gfa | wc -l)" 0 "chopping everything clears out the graph"
