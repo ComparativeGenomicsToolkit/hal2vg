@@ -13,41 +13,12 @@ static:
 	${MAKE} all
 
 check-static: static
-ifeq ($(shell ldd hal2vg | grep "not a dynamic" | wc -l), $(shell ls hal2vg | wc -l))
-	$(info ldd verified that hal2vg static)
-else
-	$(error ldd found dnymaic linked dependency in hal2vg)
-endif
-ifeq ($(shell ldd clip-vg | grep "not a dynamic" | wc -l), $(shell ls clip-vg | wc -l))
-	$(info ldd verified that clip-vg static)
-else
-	$(error ldd found dnymaic linked dependency in clip-vg)
-endif
-ifeq ($(shell ldd halRemoveDupes | grep "not a dynamic" | wc -l), $(shell ls halRemoveDupes | wc -l))
-	$(info ldd verified that halRemoveDupes static)
-else
-	$(error ldd found dnymaic linked dependency in halRemoveDupes)
-endif
-ifeq ($(shell ldd halMergeChroms | grep "not a dynamic" | wc -l), $(shell ls halMergeChroms | wc -l))
-	$(info ldd verified that halMergeChroms static)
-else
-	$(error ldd found dnymaic linked dependency in halMergeChroms)
-endif
-ifeq ($(shell ldd halUnclip | grep "not a dynamic" | wc -l), $(shell ls halUnclip | wc -l))
-	$(info ldd verified that halUnclip static)
-else
-	$(error ldd found dnymaic linked dependency in halUnclip)
-endif
-ifeq ($(shell ldd filter-paf-deletions | grep "not a dynamic" | wc -l), $(shell ls filter-paf-deletions | wc -l))
-	$(info ldd verified that filter-paf-deletions static)
-else
-	$(error ldd found dnymaic linked dependency in filter-paf-deletions)
-endif
-ifeq ($(shell ldd count-vg-hap-cov | grep "not a dynamic" | wc -l), $(shell ls count-vg-hap-cov | wc -l))
-	$(info ldd verified that count-vg-hap-cov static)
-else
-	$(error ldd found dnymaic linked dependency in count-vg-hap-cov)
-endif
+	if [ $(shell ls hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip filter-paf-deletions count-vg-hap-cov | xargs ldd 2>& 1 | grep "not a dynamic" | wc -l) = $(shell ls hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip filter-paf-deletions count-vg-hap-cov | wc -l) ] ; then\
+		echo "ldd verified that all files in bin/ are static";\
+	else\
+		echo "ldd found dynamic linked binary in bin/";\
+		exit 1;\
+	fi
 
 cleanFast : 
 	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o filter-paf-deletions filter-paf-deletions.o count-vg-hap-cov.o count-vg-hap-cov
