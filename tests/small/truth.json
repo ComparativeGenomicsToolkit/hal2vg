@@ -173,7 +173,7 @@
           "rank": "6"
         }
       ],
-      "name": "cat#0#3"
+      "name": "cat#3"
     },
     {
       "mapping": [
@@ -264,7 +264,7 @@
           "rank": "7"
         }
       ],
-      "name": "chimp#0#2"
+      "name": "chimp#2"
     },
     {
       "mapping": [
@@ -368,7 +368,7 @@
           "rank": "8"
         }
       ],
-      "name": "human#0#1"
+      "name": "human#1"
     }
   ]
 }
