@@ -653,7 +653,7 @@ void pinch_to_handle(const Genome* genome,
         subrange_t subpath = resolve_subpath_naming(parsed_name);
         string parsed_genome_name = genome->getName();
         size_t haplotype = resolve_haplotype_naming(parsed_genome_name);
-        if (sense == PathSense::HAPLOTYPE && haplotype == PathMetadata::NO_HAPLOTYPE) {
+        if (haplotype == PathMetadata::NO_HAPLOTYPE) {
             haplotype = 0;
         }
         // create the path
