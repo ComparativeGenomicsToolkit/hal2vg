@@ -27,8 +27,8 @@ hal2vg small2.hal | vg mod -O - | vg ids -s - > small2.vg
 hal2vg merged1.hal | vg mod -O - | vg ids -s - > merged1.vg
 vg view small.vg | sort > small.gfa
 vg view small2.vg | sort > small2.gfa
-vg find -x merged1.vg -p cat#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human chimp cat/human cat chimp/g" > merged1.comp1.gfa
-vg find -x merged1.vg -p cow#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human cow chimp/chimp human cow/g" > merged1.comp2.gfa
+vg find -x merged1.vg -p cat#0#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human chimp cat/chimp human cat/g" > merged1.comp1.gfa
+vg find -x merged1.vg -p cow#0#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human cow chimp/chimp human cow/g" > merged1.comp2.gfa
 diff small.gfa merged1.comp1.gfa
 is $? 0 "First component of merged graph identical to first input graph"
 diff small2.gfa merged1.comp2.gfa
@@ -60,8 +60,8 @@ hal2vg small2.hal | vg mod -O - | vg ids -s - > small2.vg
 hal2vg merged1.hal | vg mod -O - | vg ids -s - > merged1.vg
 vg view small.vg | sort > small.gfa
 vg view small2.vg | sort > small2.gfa
-vg find -x merged1.vg -p cat#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human chimp cat/human cat chimp/g" > merged1.comp1.gfa
-vg find -x merged1.vg -p cow#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human cow chimp/chimp human cow/g" > merged1.comp2.gfa
+vg find -x merged1.vg -p cat#0#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human chimp cat/chimp human cat/g" > merged1.comp1.gfa
+vg find -x merged1.vg -p cow#0#3:1 -c 1000 | vg ids -s - | vg view - | sort | sed -e 's/_0//g' | sed -e 's/_1//g' | sed -e "s/human cow chimp/chimp human cow/g" > merged1.comp2.gfa
 diff small.gfa merged1.comp1.gfa
 is $? 0 "First component of merged graph identical to first input graph"
 diff small2.gfa merged1.comp2.gfa
