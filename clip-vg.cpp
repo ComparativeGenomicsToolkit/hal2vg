@@ -262,6 +262,10 @@ int main(int argc, char** argv) {
             });
     } else if (max_unaligned != 0) {
         // apply max unaligned length to all paths
+        if (progress) {
+            cerr << "[clip-vg]: Finding unaligned intervals >= " << max_unaligned
+                 << " using anchor prefix " << anchor_prefix << " and ref prefix " << ref_prefix << endl;
+        }
         bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, anchor_prefix);
     }
     
@@ -360,17 +364,19 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
     unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
 
     // anchor-prefix means we consider a node unaligned if it doesn't align to a path with that prefix
-    // to do this check, we need a table of these paths:
-    unordered_set<path_handle_t> minigraph_paths;
+    // to do this check, we need a table of nodes on these paths:
+    unordered_set<nid_t> minigraph_nodes;
     if (!anchor_prefix.empty()) {
         graph->for_each_path_handle([&](path_handle_t path_handle) {
                 string path_name = graph->get_path_name(path_handle);
                 if (path_name.compare(0, anchor_prefix.length(), anchor_prefix) == 0) {
-                    minigraph_paths.insert(path_handle);
+                    graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                        minigraph_nodes.insert(graph->get_id(graph->get_handle_of_step(step_handle)));
+                    });
                 }
             });
     }
-
+    
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (ref_prefix.empty() || path_name.substr(0, ref_prefix.length()) != ref_prefix) {
@@ -379,18 +385,15 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         int64_t len = (int64_t)graph->get_length(handle);
-                        bool aligned = false;
-                        graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
-                                if (!anchor_prefix.empty()) {
-                                    if (minigraph_paths.count(graph->get_path_handle_of_step(step_handle_2))) {
-                                        aligned = true;
-                                    }
-                                }
-                                else if (graph->get_path_handle_of_step(step_handle_2) != path_handle) {
+                        bool aligned = minigraph_nodes.count(graph->get_id(handle));
+                        if (!aligned && anchor_prefix.empty()) {
+                            graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
+                                if (graph->get_path_handle_of_step(step_handle_2) != path_handle) {
                                     aligned = true;
                                 }
                                 return !aligned;
                             });
+                        }
                         // start an unaligned interval
                         if (start < 0 && aligned == false) {
                             start = offset;
