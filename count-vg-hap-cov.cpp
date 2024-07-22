@@ -16,7 +16,6 @@
 
 #include "bdsg/packed_graph.hpp"
 #include "bdsg/hash_graph.hpp"
-#include "bdsg/odgi.hpp"
 
 using namespace std;
 using namespace handlegraph;
@@ -35,8 +34,6 @@ static unique_ptr<PathHandleGraph> load_graph(istream& graph_stream) {
         graph = new PackedGraph();
     } else if (magic_number == HashGraph().get_magic_number()) {
         graph = new HashGraph();
-    } else if (magic_number == ODGI().get_magic_number()) {
-        graph = new ODGI();
     } else {
         cerr << "Unable to parse input graph with magic number " << magic_number << endl;
         exit(1);

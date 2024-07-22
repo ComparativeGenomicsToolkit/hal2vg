@@ -16,7 +16,6 @@
 
 #include "bdsg/packed_graph.hpp"
 #include "bdsg/hash_graph.hpp"
-#include "bdsg/odgi.hpp"
 
 using namespace std;
 using namespace handlegraph;
@@ -429,8 +428,6 @@ unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream) {
         graph = new PackedGraph();
     } else if (magic_number == HashGraph().get_magic_number()) {
         graph = new HashGraph();
-    } else if (magic_number == ODGI().get_magic_number()) {
-        graph = new ODGI();
     } else {
         cerr << "Unable to parse input graph with magic number " << magic_number << endl;
         exit(1);
@@ -479,6 +476,8 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     unordered_set<nid_t> to_destroy;
     // newly created subpaths
     vector<path_handle_t> subpaths;
+    // paths to destroy (faster to do in single api call)
+    vector<path_handle_t> paths_to_destroy;
     
     for (auto path_handle : path_handles) {
         string path_name = graph->get_path_name(path_handle);
@@ -493,9 +492,9 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             subpaths.insert(subpaths.end(), chopped_handles_subpaths.second.begin(), chopped_handles_subpaths.second.end());
             if (!chopped_handles.empty()) {
 #ifdef debug
-                cerr << "destroying path " << graph->get_path_name(path_handle) << endl;
+                cerr << "adding path to destroy list" << graph->get_path_name(path_handle) << endl;
 #endif
-                graph->destroy_path(path_handle);
+                paths_to_destroy.push_back(path_handle);
                 for (handle_t handle : chopped_handles) {
                     if (force_clip) {
                         to_destroy.insert(graph->get_id(handle));
@@ -532,6 +531,13 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
         }
     }
 
+    // delete all the paths
+#ifdef debug
+    cerr << "destroying " << paths_to_destroy.size() << " paths" << endl;
+#endif
+    graph->destroy_paths(paths_to_destroy);
+    paths_to_destroy.clear();
+
     // trim out fragments between clipped regions that would otherwise be left disconnected from the graph
     size_t removed_subpath_count = 0;
     size_t removed_subpath_base_count = 0;
@@ -550,13 +556,14 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                         to_destroy.insert(graph->get_id(handle));
                         removed_subpath_base_count += graph->get_length(handle);
                     });
-                graph->destroy_path(subpath_handle);
+                paths_to_destroy.push_back(subpath_handle);
                 if (progress) {
                     cerr << "[clip-vg]: Removing orphaned subpath " << graph->get_path_name(subpath_handle) << endl;
                 }
                 ++removed_subpath_count;
             }
         }
+        graph->destroy_paths(paths_to_destroy);
 
         // use the reference path prefix (if given) to clip out components that aren't anchored to it
         // (this would take care of above filter, but we leave that one as it's not dependent on path name)
@@ -778,6 +785,7 @@ void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const ve
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             path_names.push_back(graph->get_path_name(path_handle));
         });
+    vector<path_handle_t> paths_to_destroy;
     for (string& path_name : path_names) {
         path_handle_t path_handle = graph->get_path_handle(path_name);
         bool changed = false;
@@ -800,9 +808,10 @@ void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const ve
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     graph->append_step(new_path_handle, graph->get_handle_of_step(step_handle));
                 });
-            graph->destroy_path(path_handle);
+            paths_to_destroy.push_back(path_handle);
         }
     }
+    graph->destroy_paths(paths_to_destroy);
     
     if (progress) {
         cerr << "[clip-vg]: Replaced " << replacement_count << " substrings in " << path_count << " path names" << endl;
