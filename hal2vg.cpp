@@ -19,7 +19,6 @@
 #include "stPinchGraphs.h"
 #include "bdsg/packed_graph.hpp"
 #include "bdsg/hash_graph.hpp"
-#include "bdsg/odgi.hpp"
 #include "hal.h"
 
 using namespace std;
@@ -48,7 +47,7 @@ static void initParser(CLParser* optionsParser) {
                              "comma-separated (no spaces) list of genomes to ignore",
                              "\"\"");
     optionsParser->addOption("outputFormat",
-                             "output graph format in {pg, hg, odgi} [default=pg]",
+                             "output graph format in {pg, hg} [default=pg]",
                              "pg");
     optionsParser->addOption("chop",
                              "chop up nodes in output graph so they are not longer than given length",
@@ -116,8 +115,8 @@ int main(int argc, char** argv) {
         noAncestors = optionsParser.getFlag("noAncestors");
         ignoreGenomes = optionsParser.getOption<string>("ignoreGenomes");
         outputFormat = optionsParser.getOption<string>("outputFormat");
-        if (outputFormat != "pg" && outputFormat != "hg" && outputFormat != "odgi") {
-            throw hal_exception("--outputFormat must be one of {pg, hg, odgi}");
+        if (outputFormat != "pg" && outputFormat != "hg") {
+            throw hal_exception("--outputFormat must be one of {pg, hg}");
         }
         if (ignoreGenomes != "\"\"" && targetGenomes != "\"\"") {
             throw hal_exception("--ignoreGenomes and --targetGenomes options are "
@@ -321,8 +320,6 @@ int main(int argc, char** argv) {
             graph = unique_ptr<MutablePathMutableHandleGraph>(new PackedGraph());
         } else if (outputFormat == "hg") {
             graph = unique_ptr<MutablePathMutableHandleGraph>(new HashGraph());
-        } else if (outputFormat == "odgi") {
-            graph = unique_ptr<MutablePathMutableHandleGraph>(new ODGI());
         } else {
             assert(false);
         }
