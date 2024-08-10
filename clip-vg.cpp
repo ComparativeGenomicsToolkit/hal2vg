@@ -31,6 +31,7 @@ void help(char** argv) {
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
        << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
+       << "    -c, --allow-cycle         Do not fail with error when reference cycle detected" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
        << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
@@ -56,7 +57,7 @@ static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePat
                                                                       const vector<pair<int64_t, int64_t>>& intervals);
 static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
                                          bool progress);
-static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
+static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool allow_ref_cycles, bool progress);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
 static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress);
 
@@ -88,6 +89,7 @@ int main(int argc, char** argv) {
     int64_t max_unaligned = 0;
     string anchor_prefix;
     string ref_prefix;
+    bool allow_ref_cycles = false;
     size_t input_count = 0;
     bool force_clip = false;
     bool orphan_filter = true;
@@ -107,6 +109,7 @@ int main(int argc, char** argv) {
             {"max-unaligned", required_argument, 0, 'u'},
             {"anchor", required_argument, 0, 'a'},
             {"ref-prefix", required_argument, 0, 'e'},
+            {"allow-cycle", no_argument, 0, 'c'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
             {"no-orphan_filter", no_argument, 0, 'n'},
@@ -119,7 +122,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:a:e:fnr:d:Lo:",
+        c = getopt_long (argc, argv, "hpb:m:u:a:e:cfnr:d:Lo:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -145,6 +148,9 @@ int main(int argc, char** argv) {
             break;
         case 'e':
             ref_prefix = optarg;
+            break;
+        case 'c':
+            allow_ref_cycles = true;
             break;
         case 'f':
             force_clip = true;
@@ -281,7 +287,7 @@ int main(int argc, char** argv) {
     }
 
     if (!ref_prefix.empty()) {
-        forwardize_paths(graph.get(), ref_prefix, progress);  
+        forwardize_paths(graph.get(), ref_prefix, allow_ref_cycles, progress);  
     }
     
     if (!replace_list.empty()) {
@@ -818,7 +824,7 @@ void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const ve
     }
 }
 
-void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress) {
+void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool allow_ref_cycles, bool progress) {
     
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
@@ -860,7 +866,7 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                                     graph->flip(flipped_handle);
                                 graph->rewrite_segment(step, next_step, {new_handle});
                             }
-                            if (ref_count > 1) {
+                            if (ref_count > 1 && !allow_ref_cycles) {
                                 cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << graph->get_id(handle) << endl;
                                 exit(1);
                             }
