@@ -832,8 +832,28 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                 size_t fw_count = 0;
                 size_t total_steps = 0;
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                        ++total_steps;
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         if (graph->get_is_reverse(handle)) {
+                            vector<step_handle_t> steps = graph->steps_of_handle(handle);
+                            size_t ref_count = 0;
+                            for (step_handle_t step : steps) {
+                                if (graph->get_path_handle_of_step(step) == path_handle) {
+                                    ++ref_count;
+                                }
+                                if (ref_count > 1) {
+                                    break;
+                                }
+                            }
+                            if (ref_count > 1) {
+                                if (allow_ref_cycles) {
+                                    // todo: should be able to forwardize ref cycle if all steps are reverse
+                                    return;
+                                } else {
+                                    cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << graph->get_id(handle) << endl;
+                                exit(1);
+                                }
+                            }
                             handle_t flipped_handle = graph->create_handle(graph->get_sequence(handle));
 			    graph->follow_edges(handle, true, [&](handle_t prev_handle) {
                                     if (graph->get_id(prev_handle) != graph->get_id(handle)) {
@@ -855,26 +875,16 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                             if (graph->has_edge(graph->flip(handle), handle)) {
                                 graph->create_edge(graph->flip(flipped_handle), flipped_handle);
                             }
-                            vector<step_handle_t> steps = graph->steps_of_handle(handle);
-                            size_t ref_count = 0;
                             for (step_handle_t step : steps) {
-                                if (graph->get_path_handle_of_step(step) == path_handle) {
-                                    ++ref_count;
-                                }
                                 step_handle_t next_step = graph->get_next_step(step);
                                 handle_t new_handle = graph->get_is_reverse(graph->get_handle_of_step(step)) ? flipped_handle :
                                     graph->flip(flipped_handle);
                                 graph->rewrite_segment(step, next_step, {new_handle});
                             }
-                            if (ref_count > 1 && !allow_ref_cycles) {
-                                cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << graph->get_id(handle) << endl;
-                                exit(1);
-                            }
                             ++fw_count;
                             assert(graph->steps_of_handle(handle).empty());
                             dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
                         }
-                        ++total_steps;
                     });
                 if (fw_count > 0 && progress) {
                     cerr << "[clip-vg]: Forwardized " << fw_count << " / " << total_steps << " steps in reference path " << path_name << endl;
@@ -882,19 +892,21 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
             }
         });
 
-    // do a check just to be sure
-    graph->for_each_path_handle([&](path_handle_t path_handle) {
+    if (!allow_ref_cycles) {
+        // do a check just to be sure
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
-                        handle_t handle = graph->get_handle_of_step(step_handle);
-                        if (graph->get_is_reverse(handle)) {
-                            cerr << "[clip-vg] error: Failed to fowardize node " << graph->get_id(handle) << " in path " << path_name << endl;
-                            exit(1);
-                        }
-                    });
+                    handle_t handle = graph->get_handle_of_step(step_handle);
+                    if (graph->get_is_reverse(handle)) {
+                        cerr << "[clip-vg] error: Failed to fowardize node " << graph->get_id(handle) << " in path " << path_name << endl;
+                        exit(1);
+                    }
+                });
             }
         });
+    }
 }
 
 // this is pasted from libhandlegraph
