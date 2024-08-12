@@ -31,6 +31,7 @@ void help(char** argv) {
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
        << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
+       << "    -c, --allow-cycle         Do not fail with error when reference cycle detected" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
        << "    -n, --no-orphan-filter    Don't filter out new subpaths that don't align to anything" << endl
@@ -56,7 +57,7 @@ static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePat
                                                                       const vector<pair<int64_t, int64_t>>& intervals);
 static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
                                          bool progress);
-static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
+static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool allow_ref_cycles, bool progress);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
 static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress);
 
@@ -88,6 +89,7 @@ int main(int argc, char** argv) {
     int64_t max_unaligned = 0;
     string anchor_prefix;
     string ref_prefix;
+    bool allow_ref_cycles = false;
     size_t input_count = 0;
     bool force_clip = false;
     bool orphan_filter = true;
@@ -107,6 +109,7 @@ int main(int argc, char** argv) {
             {"max-unaligned", required_argument, 0, 'u'},
             {"anchor", required_argument, 0, 'a'},
             {"ref-prefix", required_argument, 0, 'e'},
+            {"allow-cycle", no_argument, 0, 'c'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
             {"no-orphan_filter", no_argument, 0, 'n'},
@@ -119,7 +122,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:a:e:fnr:d:Lo:",
+        c = getopt_long (argc, argv, "hpb:m:u:a:e:cfnr:d:Lo:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -145,6 +148,9 @@ int main(int argc, char** argv) {
             break;
         case 'e':
             ref_prefix = optarg;
+            break;
+        case 'c':
+            allow_ref_cycles = true;
             break;
         case 'f':
             force_clip = true;
@@ -281,7 +287,7 @@ int main(int argc, char** argv) {
     }
 
     if (!ref_prefix.empty()) {
-        forwardize_paths(graph.get(), ref_prefix, progress);  
+        forwardize_paths(graph.get(), ref_prefix, allow_ref_cycles, progress);  
     }
     
     if (!replace_list.empty()) {
@@ -818,7 +824,7 @@ void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const ve
     }
 }
 
-void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress) {
+void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool allow_ref_cycles, bool progress) {
     
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
@@ -826,8 +832,28 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                 size_t fw_count = 0;
                 size_t total_steps = 0;
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                        ++total_steps;
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         if (graph->get_is_reverse(handle)) {
+                            vector<step_handle_t> steps = graph->steps_of_handle(handle);
+                            size_t ref_count = 0;
+                            for (step_handle_t step : steps) {
+                                if (graph->get_path_handle_of_step(step) == path_handle) {
+                                    ++ref_count;
+                                }
+                                if (ref_count > 1) {
+                                    break;
+                                }
+                            }
+                            if (ref_count > 1) {
+                                if (allow_ref_cycles) {
+                                    // todo: should be able to forwardize ref cycle if all steps are reverse
+                                    return;
+                                } else {
+                                    cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << graph->get_id(handle) << endl;
+                                exit(1);
+                                }
+                            }
                             handle_t flipped_handle = graph->create_handle(graph->get_sequence(handle));
 			    graph->follow_edges(handle, true, [&](handle_t prev_handle) {
                                     if (graph->get_id(prev_handle) != graph->get_id(handle)) {
@@ -849,26 +875,16 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
                             if (graph->has_edge(graph->flip(handle), handle)) {
                                 graph->create_edge(graph->flip(flipped_handle), flipped_handle);
                             }
-                            vector<step_handle_t> steps = graph->steps_of_handle(handle);
-                            size_t ref_count = 0;
                             for (step_handle_t step : steps) {
-                                if (graph->get_path_handle_of_step(step) == path_handle) {
-                                    ++ref_count;
-                                }
                                 step_handle_t next_step = graph->get_next_step(step);
                                 handle_t new_handle = graph->get_is_reverse(graph->get_handle_of_step(step)) ? flipped_handle :
                                     graph->flip(flipped_handle);
                                 graph->rewrite_segment(step, next_step, {new_handle});
                             }
-                            if (ref_count > 1) {
-                                cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << graph->get_id(handle) << endl;
-                                exit(1);
-                            }
                             ++fw_count;
                             assert(graph->steps_of_handle(handle).empty());
                             dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
                         }
-                        ++total_steps;
                     });
                 if (fw_count > 0 && progress) {
                     cerr << "[clip-vg]: Forwardized " << fw_count << " / " << total_steps << " steps in reference path " << path_name << endl;
@@ -876,19 +892,21 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
             }
         });
 
-    // do a check just to be sure
-    graph->for_each_path_handle([&](path_handle_t path_handle) {
+    if (!allow_ref_cycles) {
+        // do a check just to be sure
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
-                        handle_t handle = graph->get_handle_of_step(step_handle);
-                        if (graph->get_is_reverse(handle)) {
-                            cerr << "[clip-vg] error: Failed to fowardize node " << graph->get_id(handle) << " in path " << path_name << endl;
-                            exit(1);
-                        }
-                    });
+                    handle_t handle = graph->get_handle_of_step(step_handle);
+                    if (graph->get_is_reverse(handle)) {
+                        cerr << "[clip-vg] error: Failed to fowardize node " << graph->get_id(handle) << " in path " << path_name << endl;
+                        exit(1);
+                    }
+                });
             }
         });
+    }
 }
 
 // this is pasted from libhandlegraph
