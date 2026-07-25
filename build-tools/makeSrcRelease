@@ -7,7 +7,7 @@ mydir=$(dirname $(which $0))
 source ${mydir}/releaseLib.sh
 
 keep=no
-if [ $1 = '--keep' ] ; then
+if [ "${1:-}" = '--keep' ] ; then
     keep=yes
 fi
 set -beEu -o pipefail

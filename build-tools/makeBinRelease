@@ -1,6 +1,7 @@
 #!/bin/bash
 # Generate release hal2vg binary
 # Must have a static buildable hdf5 (ie not the one from apt)
+# Must have autoconf, to build the vendored jemalloc
 # Must be run after tree is tagged and pushed to master.
 # Use --keep to keep working directory for debugging.
 
@@ -8,7 +9,7 @@ mydir=$(dirname $(which $0))
 source ${mydir}/releaseLib.sh
 
 keep=no
-if [ $1 = '--keep' ] ; then
+if [ "${1:-}" = '--keep' ] ; then
     keep=yes
 fi
 set -beEu -o pipefail
@@ -43,6 +44,9 @@ else
 	 sed -i deps/libbdsg-easy/deps/libbdsg/Makefile -e "s/-lomp//g"
 	 make check-static
 fi
+
+# make sure the binaries we are about to ship actually work, not just that they are static
+make test-only
 
 cp hal2vg clip-vg halRemoveDupes halMergeChroms halUnclip filter-paf-deletions count-vg-hap-cov ${buildDir}/
 

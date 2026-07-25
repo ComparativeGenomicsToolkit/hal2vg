@@ -10,3 +10,6 @@
 [submodule "deps/pinchesAndCacti"]
 	path = deps/pinchesAndCacti
 	url = https://github.com/ComparativeGenomicsToolkit/pinchesAndCacti.git
+[submodule "deps/jemalloc"]
+	path = deps/jemalloc
+	url = https://github.com/jemalloc/jemalloc.git
