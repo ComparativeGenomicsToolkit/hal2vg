@@ -947,14 +947,25 @@ void forwardize_nonref_paths(MutablePathMutableHandleGraph* graph, const string&
     // Nodes on a reference path are off limits: forwardize_paths() has just made every
     // reference step forward, and flipping one of these would undo that.
     unordered_set<nid_t> ref_nodes;
+    size_t ref_path_count = 0;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
+                ++ref_path_count;
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                         ref_nodes.insert(graph->get_id(graph->get_handle_of_step(step_handle)));
                     });
             }
         });
+
+    // With no reference there is nothing for the rest of the graph to be forward with
+    // respect to, and worse, every node would look eligible below -- a mistyped -e would
+    // quietly rewrite the whole graph instead of doing nothing.  Say so and leave it alone.
+    if (ref_path_count == 0) {
+        cerr << "[clip-vg]: warning: no path name begins with \"" << ref_prefix
+             << "\", so nothing was forwardized" << endl;
+        return;
+    }
 
     // A node that every path walks backwards can be flipped with nothing to weigh up:
     // afterwards every step on it is forward and no step has been made reverse.  It is
