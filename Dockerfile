@@ -5,7 +5,8 @@
 FROM quay.io/vgteam/vg:v1.25.0
 
 # update system and install dependencies not present in vg image
-RUN apt-get -qq update && apt-get -qq install -y libhdf5-dev build-essential python3-dev python3-pip cmake libz-dev pkg-config git
+# autoconf is needed to build the vendored jemalloc
+RUN apt-get -qq update && apt-get -qq install -y libhdf5-dev build-essential python3-dev python3-pip cmake libz-dev pkg-config git autoconf
 
 # copy current directory to docker
 ADD . /hal2vg

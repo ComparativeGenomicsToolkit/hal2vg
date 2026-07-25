@@ -29,6 +29,7 @@ clean :
 	cd deps/pinchesAndCacti && make clean
 	cd deps/hal && make clean
 	cd deps/libbdsg-easy && make clean
+	if [ -e deps/jemalloc/Makefile ] ; then cd deps/jemalloc && make clean ; fi
 
 hal2vg.o : hal2vg.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . hal2vg.cpp -c
@@ -44,6 +45,20 @@ ${sonLibPath}/stPinchesAndCacti.a : ${sonLibPath}/sonLib.a
 
 ${libbdsgPath}/lib/libbdsg.a :
 	cd deps/libbdsg-easy && make
+
+# jemalloc is vendored (rather than taken from the system) so that the static release
+# binaries are self contained and always get the same allocator: its size classes are
+# what make the pinch graph cheap, so a different version could quietly change how much
+# memory hal2vg needs.  --disable-libdl keeps it linkable into a fully static binary.
+# jemalloc is configured with its own clean flags rather than the ones make static
+# exports: its configure probes the number of significant virtual address bits by
+# linking a test program, and that probe fails outright under -static.  The archive
+# links into a static binary regardless, since -static is a link time flag.
+${jemallocPath}/lib/libjemalloc.a :
+	cd deps/jemalloc && \
+	  env CFLAGS="-O3 -g" CXXFLAGS="-O3 -g" LDFLAGS="" LIBS="" ./autogen.sh && \
+	  env CFLAGS="-O3 -g" CXXFLAGS="-O3 -g" LDFLAGS="" LIBS="" ./configure --disable-libdl && \
+	  env CFLAGS="-O3 -g" CXXFLAGS="-O3 -g" LDFLAGS="" LIBS="" ${MAKE} build_lib_static
 
 hal2vg : hal2vg.o ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -fopenmp -pthread hal2vg.o  ${basicLibs}  -o hal2vg

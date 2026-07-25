@@ -38,6 +38,13 @@ You can use the the [Dockerfile](Dockerfile) as a guide to see how all dependenc
 
      make
 
+hal2vg links against [jemalloc](https://github.com/jemalloc/jemalloc), which is vendored as
+a submodule and needs `autoconf` to build.  It saves a substantial amount of memory on large
+conversions, since the pinch graph hal2vg builds internally is dominated by small, uniformly
+sized allocations that jemalloc packs much more tightly than the system allocator.  It is
+skipped automatically on macOS; build with `DISABLE_JEMALLOC=1 make` to use the system
+allocator anywhere else.
+
 ## Usage
 
 It is required to use the `--inMemory` option for all but trivial inputs.
