@@ -34,13 +34,20 @@ clean :
 hal2vg.o : hal2vg.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . hal2vg.cpp -c
 
-${sonLibPath}/sonLib.a :
+# These recurse into submodules whose own makefiles know how to rebuild themselves, but
+# make still has to be told when to bother recursing.  Without the source lists below,
+# editing a submodule and running make here silently relinks the stale archive.
+sonLibSources = $(wildcard deps/sonLib/C/impl/*.c deps/sonLib/C/inc/*.h)
+pinchSources = $(wildcard deps/pinchesAndCacti/impl/*.c deps/pinchesAndCacti/inc/*.h)
+halSources = $(shell find deps/hal -name '*.cpp' -o -name '*.h' 2>/dev/null)
+
+${sonLibPath}/sonLib.a : ${sonLibSources}
 	cd deps/sonLib && make
 
-${halPath}/libHal.a : ${sonLibPath}/sonLib.a
+${halPath}/libHal.a : ${sonLibPath}/sonLib.a ${halSources}
 	cd deps/hal && make
 
-${sonLibPath}/stPinchesAndCacti.a : ${sonLibPath}/sonLib.a
+${sonLibPath}/stPinchesAndCacti.a : ${sonLibPath}/sonLib.a ${pinchSources}
 	cd deps/pinchesAndCacti && make
 
 ${libbdsgPath}/lib/libbdsg.a :
