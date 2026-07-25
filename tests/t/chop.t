@@ -6,7 +6,33 @@ BASH_TAP_ROOT=./bash-tap
 PATH=../bin:$PATH
 PATH=../deps/hal:$PATH
 
-plan tests 18
+plan tests 40
+
+# how many steps of a given path still point backwards.  Reports instead of counting if the
+# graph is unusable or the path is missing, so that a crashed run leaving an empty output
+# can't be mistaken for a graph with no reverse steps.
+ref_rev_steps() { # $1=graph  $2=path name
+    if ! vg validate "$1" > /dev/null 2>&1; then echo "invalid-graph"; return; fi
+    if [ "$(vg view "$1" | awk -v p="$2" '$1=="P" && $2==p' | wc -l)" -ne 1 ]; then
+        echo "no-such-path"; return
+    fi
+    vg view "$1" | awk -v p="$2" '$1=="P" && $2==p {print $3}' | tr ',' '\n' | grep -c -- '-$'
+}
+
+# same, across every path in the graph
+all_rev_steps() { # $1=graph
+    if ! vg validate "$1" > /dev/null 2>&1; then echo "invalid-graph"; return; fi
+    vg view "$1" | awk '$1=="P" {print $3}' | tr ',' '\n' | grep -c -- '-$'
+}
+
+# forwardizing must never alter what the paths spell out
+same_path_seqs() { # $1=before  $2=after
+    vg paths -Fv "$1" | sort > .seq-before.fa
+    vg paths -Fv "$2" | sort > .seq-after.fa
+    diff -q .seq-before.fa .seq-after.fa > /dev/null
+    echo $?
+    rm -f .seq-before.fa .seq-after.fa
+}
 
 vg convert -g chop/tiny-flat.gfa -p > tiny-flat.vg
 printf "x\t0\t100\n" > all.bed
@@ -89,4 +115,88 @@ vg paths -Fv tiny-fr-forwardized.vg > tiny-fr-forwardized.fa
 diff tiny-fr.fa tiny-fr-forwardized.fa
 is "$?" 0  "fowawrsization does not affect path sequence"
 
-rm -f tiny-fr.vg tiny-fr.fa tiny-fr-forwardized.vg tiny-fr-forwardized.fa tiny-fr-forwardized.fa
+# the diff above only compares path sequence, which flipping preserves by construction.
+# check that the reference actually came out forward.
+is "$(ref_rev_steps tiny-fr-forwardized.vg x)" "0" "reference path x is forwardized"
+
+rm -f tiny-fr.vg tiny-fr.fa tiny-fr-forwardized.vg tiny-fr-forwardized.fa
+
+########## forwardizing a plain reverse reference node ##########
+
+vg convert -g chop/ref-rev-simple.gfa -p > ref-rev.vg
+clip-vg ref-rev.vg -e x > ref-rev-fwd.vg
+is "$?" "0" "a reverse reference node forwardizes without error"
+is "$(ref_rev_steps ref-rev-fwd.vg x)" "0" "reference path x is forwardized"
+is "$(same_path_seqs ref-rev.vg ref-rev-fwd.vg)" "0" "forwardizing does not affect path sequence"
+
+rm -f ref-rev.vg ref-rev-fwd.vg
+
+########## reference cycles: -c must never abort ##########
+# -c is used by minigraph-cactus when reference cycles are allowed.  It has to let
+# non-forward reference nodes through rather than failing.
+
+# every visit to the cycled node is backwards, so one flip forwardizes all of them
+vg convert -g chop/ref-cycle-all-rev.gfa -p > cyc-rev.vg
+clip-vg cyc-rev.vg -e x -c > cyc-rev-fwd.vg
+is "$?" "0" "-c on an all-reverse reference cycle does not error"
+is "$(ref_rev_steps cyc-rev-fwd.vg x)" "0" "an all-reverse reference cycle is forwardized"
+is "$(same_path_seqs cyc-rev.vg cyc-rev-fwd.vg)" "0" "forwardizing a reference cycle preserves path sequence"
+
+rm -f cyc-rev.vg cyc-rev-fwd.vg
+
+# the cycled node is also the path's last step -- this used to walk the path traversal
+# off its end and abort inside libbdsg
+vg convert -g chop/ref-cycle-tail.gfa -p > cyc-tail.vg
+clip-vg cyc-tail.vg -e x -c > cyc-tail-fwd.vg
+is "$?" "0" "-c on a reference cycle ending on the cycled node does not crash"
+is "$(ref_rev_steps cyc-tail-fwd.vg x)" "0" "a reference cycle on the last step is forwardized"
+is "$(same_path_seqs cyc-tail.vg cyc-tail-fwd.vg)" "0" "forwardizing a tail cycle preserves path sequence"
+
+rm -f cyc-tail.vg cyc-tail-fwd.vg
+
+# the reference walks the node both ways round, so no orientation suits every visit.
+# the reverse step has to survive into the output rather than being an error.
+vg convert -g chop/ref-cycle-mixed.gfa -p > cyc-mix.vg
+clip-vg cyc-mix.vg -e x -c > cyc-mix-fwd.vg
+is "$?" "0" "-c on a mixed-orientation reference cycle does not error"
+is "$(ref_rev_steps cyc-mix-fwd.vg x)" "1" "the un-forwardizable reference step passes through"
+is "$(same_path_seqs cyc-mix.vg cyc-mix-fwd.vg)" "0" "a mixed reference cycle preserves path sequence"
+
+# ... but without -c the same graph is still rejected
+clip-vg cyc-mix.vg -e x > cyc-mix-nc.vg 2> cyc-mix-nc.err
+is "$?" "1" "a reference cycle without -c is still an error"
+is "$(grep -c 'Cycle detected' cyc-mix-nc.err)" "1" "the reference cycle error names the cause"
+
+rm -f cyc-mix.vg cyc-mix-fwd.vg cyc-mix-nc.vg cyc-mix-nc.err
+
+# two reference contigs sharing one node in opposite orientations -- not a cycle at all
+vg convert -g chop/ref-two-contigs.gfa -p > two-ctg.vg
+clip-vg two-ctg.vg -e x -c > two-ctg-fwd.vg
+is "$?" "0" "-c on two reference contigs sharing a node does not error"
+is "$(all_rev_steps two-ctg-fwd.vg)" "1" "the shared node stays reverse on one contig"
+
+rm -f two-ctg.vg two-ctg-fwd.vg
+
+########## non-reference cycles are always allowed ##########
+
+vg convert -g chop/nonref-cycle.gfa -p > nr-cyc.vg
+clip-vg nr-cyc.vg -e x > nr-cyc-fwd.vg
+is "$?" "0" "an all-reverse non-reference cycle needs no -c"
+
+vg convert -g chop/nonref-cycle-mixed.gfa -p > nr-cycm.vg
+clip-vg nr-cycm.vg -e x > nr-cycm-fwd.vg
+is "$?" "0" "a mixed-orientation non-reference cycle needs no -c"
+
+rm -f nr-cyc.vg nr-cyc-fwd.vg nr-cycm.vg nr-cycm-fwd.vg
+
+########## forwardizing nodes no path visits forward ##########
+# a contig aligned in reverse leaves a run of nodes every path walks backwards.
+# nothing downstream can flip them, so clip-vg does it here.
+
+vg convert -g chop/nonref-rev.gfa -p > nr-rev.vg
+clip-vg nr-rev.vg -e x > nr-rev-fwd.vg
+is "$?" "0" "a reverse-aligned non-reference contig forwardizes without error"
+is "$(ref_rev_steps nr-rev-fwd.vg samp.ctg)" "0" "nodes no path visits forward are flipped"
+is "$(same_path_seqs nr-rev.vg nr-rev-fwd.vg)" "0" "flipping non-reference nodes preserves path sequence"
+
+rm -f nr-rev.vg nr-rev-fwd.vg

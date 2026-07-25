@@ -1,0 +1,12 @@
+H	VN:Z:1.0
+S	1	ACGTACGTAC
+S	2	TTTTAAAACC
+S	3	GGATTCCAGT
+S	4	CCTTAAGGTT
+P	x.chr1	1+,4+	*
+P	samp.ctg	1+,2-,3+,2-,4+	*
+L	1	+	4	+	*
+L	1	+	2	-	*
+L	2	-	3	+	*
+L	3	+	2	-	*
+L	2	-	4	+	*

@@ -1,0 +1,6 @@
+H	VN:Z:1.0
+S	1	ACGTACGTAC
+S	2	TTTTAAAACC
+P	x	1-,2+,1-	*
+L	1	-	2	+	*
+L	2	+	1	-	*
