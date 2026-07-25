@@ -108,4 +108,9 @@ count-vg-hap-cov : count-vg-hap-cov.o ${basicLibsDependencies}
 
 test :
 	make
+	${MAKE} test-only
+
+# run the tests against whatever binaries are already sitting in the tree.  the release
+# build makes static ones, and a plain make would relink them dynamically before testing
+test-only :
 	cd tests && prove -v t
