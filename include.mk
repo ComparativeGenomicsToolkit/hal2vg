@@ -37,6 +37,7 @@ CXXFLAGS += -std=c++14 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${lib
 basicLibs = ${halPath}/libHal.a ${sonLibPath}/stPinchesAndCacti.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
 ifeq (${jemalloc},on)
 	basicLibs += ${jemallocPath}/lib/libjemalloc.a
+	CXXFLAGS += -DHAVE_JEMALLOC
 endif
 # note the := : basicLibsDependencies is used as make prerequisites, so it must
 # capture only the archives, before the -l flags below are appended

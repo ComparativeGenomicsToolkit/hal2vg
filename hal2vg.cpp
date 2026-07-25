@@ -15,6 +15,9 @@
 #include <fstream>
 #include <deque>
 #include <unordered_map>
+#if defined(__GLIBC__) && !defined(HAVE_JEMALLOC)
+#include <malloc.h>
+#endif
 
 #include "stPinchGraphs.h"
 #include "bdsg/packed_graph.hpp"
@@ -84,7 +87,6 @@ static void pinch_to_handle(const Genome* genome,
                             stPinchThreadSet* threadSet,
                             const vector<string>& IDToName,
                             const unordered_map<string, int64_t>& nameToID,
-                            unordered_map<stPinchBlock*, nid_t>& blockToNode,
                             MutablePathMutableHandleGraph& graph,
                             const vector<string>& refNames);
 
@@ -314,6 +316,14 @@ int main(int argc, char** argv) {
         }
         stPinchThreadSet_joinTrivialBoundaries(threadSet);
 
+        // building the pinch graph leaves the heap littered with small free chunks that the
+        // much bigger allocations made below cannot reuse.  consolidate them and give whole
+        // free pages back to the OS before switching over.  jemalloc does not suffer from
+        // this and has no malloc_trim, so this is only for builds without it
+#if defined(__GLIBC__) && !defined(HAVE_JEMALLOC)
+        malloc_trim(0);
+#endif
+
         // make a handle graph
         unique_ptr<MutablePathMutableHandleGraph> graph;
         if (outputFormat == "pg") {
@@ -324,8 +334,15 @@ int main(int argc, char** argv) {
             assert(false);
         }
 
-        // keep track of where blocks fit into the handle graph
-        unordered_map<stPinchBlock*, nid_t> blockToNode;
+        // keep track of where blocks fit into the handle graph.  a block -> node id hash
+        // table would cost some 48 bytes for every node in the output, so the id is parked
+        // in the block's supporting-homology count instead, which nothing needs any more now
+        // that pinching is done.  zero it first so that 0 means "not converted yet"
+        stPinchThreadSetBlockIt blockIt = stPinchThreadSet_getBlockIt(threadSet);
+        for (stPinchBlock* block = stPinchThreadSetBlockIt_getNext(&blockIt); block != NULL;
+             block = stPinchThreadSetBlockIt_getNext(&blockIt)) {
+            stPinchBlock_setNumSupportingHomologies(block, 0);
+        }
 
         // start iterating over the genomes again in order to export to handle graph
         queue = {rootGenomeName};
@@ -347,7 +364,7 @@ int main(int argc, char** argv) {
                     cerr << "converting " << genomeName << " with " << genome->getNumSequences()
                          << " sequences and total length " << genome->getSequenceLength() << endl;
                 }
-                pinch_to_handle(genome, threadSet, IDToName, nameToID, blockToNode, *graph, refNames);
+                pinch_to_handle(genome, threadSet, IDToName, nameToID, *graph, refNames);
 
                 alignment->closeGenome(genome);
             }
@@ -629,7 +646,6 @@ void pinch_to_handle(const Genome* genome,
                      stPinchThreadSet* threadSet,
                      const vector<string>& IDToName,
                      const unordered_map<string, int64_t>& nameToID,
-                     unordered_map<stPinchBlock*, nid_t>& blockToNode,
                      MutablePathMutableHandleGraph& graph,
                      const vector<string>& refNames) {
 
@@ -661,14 +677,19 @@ void pinch_to_handle(const Genome* genome,
                                                      sense == PathSense::HAPLOTYPE ? 0 : PathMetadata::NO_PHASE_BLOCK,
                                                      subpath,
                                                      false);
-        string pathString;
-        
+        // the converted path gets checked against the hal a segment at a time (below), so we
+        // never need to hold a whole chromosome's worth of sequence in memory to do it
+        size_t pathLength = 0;
+        size_t numMismatches = 0;
+        vector<pair<size_t, pair<char, char>>> mismatches;
+
         // iterate over the segments of the sequence
         stPinchSegment* prevSeg = nullptr;
         handle_t prevHandle;
         stPinchSegment* lastSeg = stPinchThread_getLast(thread);
         hal_index_t segStart = 0;
         string seqString;
+        string nodeString;
         for (stPinchSegment* seg = stPinchThread_getFirst(thread); ;
              seg = stPinchSegment_get3Prime(seg)) {
 
@@ -677,20 +698,25 @@ void pinch_to_handle(const Genome* genome,
             bool reversed = block != nullptr && stPinchSegment_getBlockOrientation(seg) == 0;
             handle_t handle;
 
-            // get the segment's dna sequence from the hal
+            // get the segment's dna sequence from the hal.  seqString stays in path
+            // orientation; nodeString is the block-relative orientation that gets stored
             sequence->getSubString(seqString, segStart, stPinchSegment_getLength(seg));
-            if (reversed) {
-                // we always work in block-relative orientation
-                reverseComplement(seqString);
-            }
-            
+
             // have we already converted this block?
-            auto bi = blockToNode.find(block);
-            if (bi == blockToNode.end()) {
+            nid_t blockNode = block != nullptr ? (nid_t)stPinchBlock_getNumSupportingHomologies(block) : 0;
+            if (blockNode == 0) {
                 // no: it is a new block
-                handle = graph.create_handle(seqString);
+                if (reversed) {
+                    // we always work in block-relative orientation
+                    nodeString = seqString;
+                    reverseComplement(nodeString);
+                    handle = graph.create_handle(nodeString);
+                } else {
+                    handle = graph.create_handle(seqString);
+                }
                 if (block != nullptr) {
-                    blockToNode[block] = graph.get_id(handle);
+                    assert(graph.get_id(handle) > 0);
+                    stPinchBlock_setNumSupportingHomologies(block, (uint64_t)graph.get_id(handle));
                 }
 #ifdef debug
                 cerr << "created node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
@@ -699,8 +725,8 @@ void pinch_to_handle(const Genome* genome,
                 cerr << "node seq " << graph.get_sequence(handle) << endl;
 #endif
             } else {
-                // yes: we can find it in the table
-                handle = graph.get_handle(bi->second);
+                // yes: the id is stored on the block itself
+                handle = graph.get_handle(blockNode);
 #ifdef debug
                 cerr << "found node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
                      << " rev=" << reversed << " len=" << seqString.length()
@@ -726,7 +752,22 @@ void pinch_to_handle(const Genome* genome,
 
             // add the node to the path
             graph.append_step(pathHandle, handle);
-            pathString += graph.get_sequence(handle);
+
+            // make sure what we just appended agrees with the hal.  a node created above is
+            // trivially identical to it, so only a block first converted from some other
+            // sequence can actually disagree
+            if (blockNode != 0) {
+                nodeString = graph.get_sequence(handle);
+                for (size_t i = 0; i < nodeString.size() && i < seqString.size(); ++i) {
+                    if (toupper(nodeString[i]) != toupper(seqString[i])) {
+                        if (mismatches.size() < 10) {
+                            mismatches.push_back(make_pair(segStart + i, make_pair(nodeString[i], seqString[i])));
+                        }
+                        ++numMismatches;
+                    }
+                }
+            }
+            pathLength += seqString.length();
 
             prevSeg = seg;
             prevHandle = handle;
@@ -739,23 +780,16 @@ void pinch_to_handle(const Genome* genome,
         }
 
         // make sure the path we added is the same as the hal
-        string halPathString;
-        sequence->getString(halPathString);
-        if (pathString.length() != halPathString.length()) {
-            throw runtime_error("Incorrect length in coverted path for " + sequence->getFullName() + ": " + std::to_string(pathString.length()) +
-                                ". Should be: " + std::to_string(halPathString.length()));
+        if (pathLength != sequence->getSequenceLength()) {
+            throw runtime_error("Incorrect length in coverted path for " + sequence->getFullName() + ": " + std::to_string(pathLength) +
+                                ". Should be: " + std::to_string(sequence->getSequenceLength()));
         }
-        vector<size_t> mismatches;
-        for (size_t i = 0; i < halPathString.size(); ++i) {
-            if (toupper(pathString[i]) != toupper(halPathString[i])) {
-                mismatches.push_back(i);
-            }
-        }
-        if (!mismatches.empty()) {
+        if (numMismatches > 0) {
             stringstream msg;
-            msg << mismatches.size() << " mismatches found in converted path for " << sequence->getFullName() << ":\n";
-            for (size_t i = 0; i < mismatches.size() && i < 10; ++i) {
-                msg << " path[" << mismatches[i] << "]=" << pathString[mismatches[i]] << ". should be " << halPathString[mismatches[i]] << "\n";
+            msg << numMismatches << " mismatches found in converted path for " << sequence->getFullName() << ":\n";
+            for (size_t i = 0; i < mismatches.size(); ++i) {
+                msg << " path[" << mismatches[i].first << "]=" << mismatches[i].second.first
+                    << ". should be " << mismatches[i].second.second << "\n";
             }
             throw runtime_error(msg.str());
         }
