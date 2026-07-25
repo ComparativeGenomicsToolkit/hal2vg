@@ -3,8 +3,8 @@
 BASH_TAP_ROOT=./bash-tap
 . ${BASH_TAP_ROOT}/bash-tap-bootstrap
 
-PATH=../bin:$PATH
-PATH=../deps/hal:$PATH
+PATH=..:$PATH
+PATH=../deps/hal/bin:$PATH
 
 plan tests 10
 
