@@ -30,7 +30,7 @@ void help(char** argv) {
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
        << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
-       << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
+       << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR, along with any node that no path visits forward" << endl
        << "    -c, --allow-cycle         Do not fail with error when reference cycle detected" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
@@ -58,6 +58,8 @@ static pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePat
 static void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const vector<string>& to_replace,
                                          bool progress);
 static void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool allow_ref_cycles, bool progress);
+static void forwardize_nonref_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress);
+static void flip_node(MutablePathMutableHandleGraph* graph, nid_t node_id);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
 static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress);
 
@@ -233,6 +235,24 @@ int main(int argc, char** argv) {
         cerr << "[clip-vg]: Loaded graph" << endl;
     }
 
+    // Catch a mistyped -e here, before anything has been clipped.  Unaligned regions are measured
+    // against the reference, so a prefix that matches no path makes every base look unaligned and
+    // the orphan filter then removes the entire graph -- silently, with exit 0.
+    if (!ref_prefix.empty()) {
+        bool found_ref_path = false;
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
+                if (graph->get_path_name(path_handle).substr(0, ref_prefix.length()) == ref_prefix) {
+                    found_ref_path = true;
+                }
+                return !found_ref_path;
+            });
+        if (!found_ref_path) {
+            cerr << "[clip-vg] error: No path name begins with \"" << ref_prefix
+                 << "\" given with -e/--ref-prefix" << endl;
+            return 1;
+        }
+    }
+
     unordered_map<string, vector<pair<int64_t, int64_t>>> input_graph_intervals;
     if (!out_bed_path.empty()) {
         input_graph_intervals = get_path_intervals(graph.get());
@@ -287,7 +307,8 @@ int main(int argc, char** argv) {
     }
 
     if (!ref_prefix.empty()) {
-        forwardize_paths(graph.get(), ref_prefix, allow_ref_cycles, progress);  
+        forwardize_paths(graph.get(), ref_prefix, allow_ref_cycles, progress);
+        forwardize_nonref_paths(graph.get(), ref_prefix, progress);
     }
     
     if (!replace_list.empty()) {
@@ -824,68 +845,141 @@ void replace_path_name_substrings(MutablePathMutableHandleGraph* graph, const ve
     }
 }
 
+// Replace a node by its reverse complement, so that every step that visited it backwards
+// now visits it forwards (and every step that visited it forwards now visits it backwards).
+// The incident edges and every step are rewired onto a new node, and the old one destroyed,
+// so the node comes out with a fresh id.
+// Note that this rewrites every step on the node, not just the ones going backwards, so it must
+// not be called while a path containing the node is being traversed.
+void flip_node(MutablePathMutableHandleGraph* graph, nid_t node_id) {
+    handle_t handle = graph->flip(graph->get_handle(node_id));
+    handle_t flipped_handle = graph->create_handle(graph->get_sequence(handle));
+    graph->follow_edges(handle, true, [&](handle_t prev_handle) {
+            if (graph->get_id(prev_handle) != graph->get_id(handle)) {
+                graph->create_edge(prev_handle, flipped_handle);
+            }
+        });
+    graph->follow_edges(handle, false, [&](handle_t next_handle) {
+            if (graph->get_id(handle) != graph->get_id(next_handle)) {
+                graph->create_edge(flipped_handle, next_handle);
+            }
+        });
+    // self-loop cases we punted on above:
+    if (graph->has_edge(handle, handle)) {
+        graph->create_edge(flipped_handle, flipped_handle);
+    }
+    if (graph->has_edge(handle, graph->flip(handle))) {
+        graph->create_edge(flipped_handle, graph->flip(flipped_handle));
+    }
+    if (graph->has_edge(graph->flip(handle), handle)) {
+        graph->create_edge(graph->flip(flipped_handle), flipped_handle);
+    }
+    vector<step_handle_t> steps = graph->steps_of_handle(handle);
+    for (step_handle_t step : steps) {
+        step_handle_t next_step = graph->get_next_step(step);
+        handle_t new_handle = graph->get_is_reverse(graph->get_handle_of_step(step)) ? flipped_handle :
+            graph->flip(flipped_handle);
+        graph->rewrite_segment(step, next_step, {new_handle});
+    }
+    assert(graph->steps_of_handle(handle).empty());
+    dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+}
+
+// bits of the per-node census flags below
+static const uint8_t CENSUS_SEEN = 1;
+static const uint8_t CENSUS_REV = 2;
+static const uint8_t CENSUS_MULTI = 4;
+
 void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool allow_ref_cycles, bool progress) {
-    
+
+    // Census state, reused across paths.  A byte per node id rather than a hash entry: the map this
+    // replaced cost ~76 bytes per reference-path node and was paid on every run, including the
+    // overwhelmingly common one where nothing needs flipping at all.  Only nodes the path visits more
+    // than once -- reference cycles, which are rare -- need their visits counted exactly, so those go
+    // in a map that stays tiny.
+    if (graph->get_node_count() == 0) {
+        return;
+    }
+    const nid_t base_id = graph->min_node_id();
+    vector<uint8_t> flags;
+    vector<nid_t> order;                               // first-visit order, for determinism
+    unordered_map<nid_t, pair<size_t, size_t>> multi;  // cycled node -> (visits, backwards visits)
+
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
                 size_t fw_count = 0;
                 size_t total_steps = 0;
+                order.clear();
+                multi.clear();
+                // flipping mints ids above the old maximum, so the range can grow between paths
+                size_t needed = graph->max_node_id() - base_id + 1;
+                if (flags.size() < needed) {
+                    flags.resize(needed, 0);
+                }
+
+                // Take a census of the path before touching anything.  Flipping from inside
+                // for_each_step_in_path() is not safe: the traversal caches the path's last step up
+                // front and stops only when it reaches it, but flipping rewrites every step on the
+                // node.  A reference cycle whose other visit happens to be that last step therefore
+                // destroys the loop's terminator and walks it off the end of the path.
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
-                        ++total_steps;
                         handle_t handle = graph->get_handle_of_step(step_handle);
-                        if (graph->get_is_reverse(handle)) {
-                            vector<step_handle_t> steps = graph->steps_of_handle(handle);
-                            size_t ref_count = 0;
-                            for (step_handle_t step : steps) {
-                                if (graph->get_path_handle_of_step(step) == path_handle) {
-                                    ++ref_count;
-                                }
-                                if (ref_count > 1) {
-                                    break;
-                                }
+                        nid_t node_id = graph->get_id(handle);
+                        uint8_t& f = flags[node_id - base_id];
+                        bool is_rev = graph->get_is_reverse(handle);
+                        if (f & CENSUS_SEEN) {
+                            if (!(f & CENSUS_MULTI)) {
+                                // second visit: start counting, seeding with the first
+                                f |= CENSUS_MULTI;
+                                multi[node_id] = make_pair((size_t)1, (size_t)((f & CENSUS_REV) ? 1 : 0));
                             }
-                            if (ref_count > 1) {
-                                if (allow_ref_cycles) {
-                                    // todo: should be able to forwardize ref cycle if all steps are reverse
-                                    return;
-                                } else {
-                                    cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << graph->get_id(handle) << endl;
-                                exit(1);
-                                }
+                            pair<size_t, size_t>& visits = multi[node_id];
+                            ++visits.first;
+                            if (is_rev) {
+                                ++visits.second;
                             }
-                            handle_t flipped_handle = graph->create_handle(graph->get_sequence(handle));
-			    graph->follow_edges(handle, true, [&](handle_t prev_handle) {
-                                    if (graph->get_id(prev_handle) != graph->get_id(handle)) {
-                                        graph->create_edge(prev_handle, flipped_handle);
-                                    }
-			      });
-			    graph->follow_edges(handle, false, [&](handle_t next_handle) {
-                                    if (graph->get_id(handle) != graph->get_id(next_handle)) {
-                                        graph->create_edge(flipped_handle, next_handle);
-                                    }
-			      });
-                            // self-loop cases we punted on above:
-                            if (graph->has_edge(handle, handle)) {
-                                graph->create_edge(flipped_handle, flipped_handle);
-                            }
-                            if (graph->has_edge(handle, graph->flip(handle))) {
-                                graph->create_edge(flipped_handle, graph->flip(flipped_handle));                                
-                            }
-                            if (graph->has_edge(graph->flip(handle), handle)) {
-                                graph->create_edge(graph->flip(flipped_handle), flipped_handle);
-                            }
-                            for (step_handle_t step : steps) {
-                                step_handle_t next_step = graph->get_next_step(step);
-                                handle_t new_handle = graph->get_is_reverse(graph->get_handle_of_step(step)) ? flipped_handle :
-                                    graph->flip(flipped_handle);
-                                graph->rewrite_segment(step, next_step, {new_handle});
-                            }
-                            ++fw_count;
-                            assert(graph->steps_of_handle(handle).empty());
-                            dynamic_cast<DeletableHandleGraph*>(graph)->destroy_handle(handle);
+                        } else {
+                            f |= CENSUS_SEEN;
+                            order.push_back(node_id);
                         }
+                        if (is_rev) {
+                            f |= CENSUS_REV;
+                        }
+                        ++total_steps;
                     });
+
+                for (nid_t node_id : order) {
+                    uint8_t f = flags[node_id - base_id];
+                    flags[node_id - base_id] = 0;  // reset as we go, so the next path starts clean
+                    if (!(f & CENSUS_REV)) {
+                        // every visit is already forward
+                        continue;
+                    }
+                    // visited once unless it is one of the rare cycled nodes
+                    size_t ref_count = 1;
+                    size_t rev_count = 1;
+                    if (f & CENSUS_MULTI) {
+                        const pair<size_t, size_t>& visits = multi[node_id];
+                        ref_count = visits.first;
+                        rev_count = visits.second;
+                    }
+                    if (ref_count > 1) {
+                        if (!allow_ref_cycles) {
+                            cerr << "[clip-vg] error: Cycle detected in reference path " << path_name << " at node " << node_id << endl;
+                            exit(1);
+                        }
+                        if (rev_count != ref_count) {
+                            // The reference walks this node both ways round, so no orientation
+                            // satisfies every visit -- flipping would just move the reversal onto
+                            // the other step.  Leave it be.
+                            continue;
+                        }
+                        // Every visit is backwards, so one flip forwardizes all of them.
+                    }
+                    flip_node(graph, node_id);
+                    fw_count += rev_count;
+                }
                 if (fw_count > 0 && progress) {
                     cerr << "[clip-vg]: Forwardized " << fw_count << " / " << total_steps << " steps in reference path " << path_name << endl;
                 }
@@ -893,20 +987,101 @@ void forwardize_paths(MutablePathMutableHandleGraph* graph, const string& ref_pr
         });
 
     if (!allow_ref_cycles) {
-        // do a check just to be sure
+        // do a check just to be sure.  Not valid with -c, where a node the reference walks both
+        // ways round is deliberately left reverse above.
         graph->for_each_path_handle([&](path_handle_t path_handle) {
+                string path_name = graph->get_path_name(path_handle);
+                if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
+                    graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                            handle_t handle = graph->get_handle_of_step(step_handle);
+                            if (graph->get_is_reverse(handle)) {
+                                cerr << "[clip-vg] error: Failed to fowardize node " << graph->get_id(handle) << " in path " << path_name << endl;
+                                exit(1);
+                            }
+                        });
+                }
+            });
+    }
+}
+
+void forwardize_nonref_paths(MutablePathMutableHandleGraph* graph, const string& ref_prefix, bool progress) {
+
+    if (graph->get_node_count() == 0) {
+        return;
+    }
+
+    // Nodes on a reference path are off limits: forwardize_paths() has just made every
+    // reference step forward, and flipping one of these would undo that.  A bit per node id
+    // rather than a hash set -- this is one entry per reference base at whole-genome scale.
+    const nid_t base_id = graph->min_node_id();
+    vector<bool> ref_nodes(graph->max_node_id() - base_id + 1, false);
+    size_t ref_path_count = 0;
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (path_name.substr(0, ref_prefix.length()) == ref_prefix) {
+                ++ref_path_count;
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
-                    handle_t handle = graph->get_handle_of_step(step_handle);
-                    if (graph->get_is_reverse(handle)) {
-                        cerr << "[clip-vg] error: Failed to fowardize node " << graph->get_id(handle) << " in path " << path_name << endl;
-                        exit(1);
-                    }
-                });
+                        ref_nodes[graph->get_id(graph->get_handle_of_step(step_handle)) - base_id] = true;
+                    });
             }
         });
+
+    // With no reference there is nothing for the rest of the graph to be forward with
+    // respect to, and worse, every node would look eligible below -- a mistyped -e would
+    // quietly rewrite the whole graph instead of doing nothing.  Say so and leave it alone.
+    if (ref_path_count == 0) {
+        cerr << "[clip-vg]: warning: no path name begins with \"" << ref_prefix
+             << "\", so nothing was forwardized" << endl;
+        return;
     }
+
+    // A node that every path walks backwards can be flipped with nothing to weigh up:
+    // afterwards every step on it is forward and no step has been made reverse.  It is
+    // the whole-run case that matters here -- a contig aligned in reverse to the
+    // reference gives a stretch of such nodes, and nothing downstream can flip them once
+    // the graph is written, because doing so is a change of topology rather than of
+    // annotation.  Nodes that some path walks forwards are left alone: flipping one of
+    // those only moves the reversal onto a different path.
+    //
+    // Each node's decision depends only on its own steps, so it does not matter what
+    // order they are visited in.  The flips themselves are applied in node id order so
+    // that the ids handed out to the replacement nodes are deterministic too.
+    vector<nid_t> to_flip;
+    graph->for_each_handle([&](handle_t handle) {
+            nid_t node_id = graph->get_id(handle);
+            if (ref_nodes[node_id - base_id]) {
+                return;
+            }
+            bool has_step = false;
+            bool all_reverse = true;
+            graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle) {
+                    has_step = true;
+                    if (!graph->get_is_reverse(graph->get_handle_of_step(step_handle))) {
+                        all_reverse = false;
+                    }
+                    return all_reverse;
+                });
+            if (has_step && all_reverse) {
+                to_flip.push_back(node_id);
+            }
+        });
+    std::sort(to_flip.begin(), to_flip.end());
+
+    size_t flipped_bases = 0;
+    for (nid_t node_id : to_flip) {
+        flipped_bases += graph->get_length(graph->get_handle(node_id));
+        flip_node(graph, node_id);
+    }
+
+    if (!to_flip.empty() && progress) {
+        cerr << "[clip-vg]: Forwardized " << to_flip.size() << " nodes (" << flipped_bases
+             << " bp) that no path visited forward" << endl;
+    }
+
+    // No verification sweep here on purpose.  It would be a second full pass over every handle and
+    // every step -- 40% of this tool's runtime with -e -- and it cannot fire: to_flip was built from
+    // a complete sweep with exactly the predicate it would re-test, flip_node() leaves every step on
+    // the replacement node forward, and the ids it mints are never in ref_nodes.
 }
 
 // this is pasted from libhandlegraph
