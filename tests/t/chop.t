@@ -199,10 +199,14 @@ is "$?" "0" "a reverse-aligned non-reference contig forwardizes without error"
 is "$(ref_rev_steps nr-rev-fwd.vg samp.ctg)" "0" "nodes no path visits forward are flipped"
 is "$(same_path_seqs nr-rev.vg nr-rev-fwd.vg)" "0" "flipping non-reference nodes preserves path sequence"
 
-# ... but a prefix that matches nothing must not make the whole graph look eligible
+# ... and a prefix matching no path is an error, caught before anything is clipped
 clip-vg nr-rev.vg -e no-such-prefix > nr-rev-none.vg 2> nr-rev-none.err
-is "$?" "0" "a reference prefix matching no path is not an error"
-is "$(ref_rev_steps nr-rev-none.vg samp.ctg)" "2" "a reference prefix matching no path leaves the graph alone"
-is "$(grep -c 'no path name begins with' nr-rev-none.err)" "1" "a reference prefix matching no path warns"
+is "$?" "1" "a reference prefix matching no path is an error"
+is "$(grep -c 'No path name begins with' nr-rev-none.err)" "1" "the error names the missing prefix"
 
-rm -f nr-rev.vg nr-rev-fwd.vg nr-rev-none.vg nr-rev-none.err
+# the case that mattered: with -u every base looks unaligned when there is no reference,
+# and the orphan filter used to remove the whole graph and exit 0
+clip-vg nr-rev.vg -e no-such-prefix -u 5 > nr-rev-u.vg 2> nr-rev-u.err
+is "$?" "1" "a mistyped -e with -u fails instead of silently emitting an empty graph"
+
+rm -f nr-rev.vg nr-rev-fwd.vg nr-rev-none.vg nr-rev-none.err nr-rev-u.vg nr-rev-u.err

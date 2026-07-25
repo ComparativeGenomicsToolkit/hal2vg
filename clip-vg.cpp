@@ -235,6 +235,24 @@ int main(int argc, char** argv) {
         cerr << "[clip-vg]: Loaded graph" << endl;
     }
 
+    // Catch a mistyped -e here, before anything has been clipped.  Unaligned regions are measured
+    // against the reference, so a prefix that matches no path makes every base look unaligned and
+    // the orphan filter then removes the entire graph -- silently, with exit 0.
+    if (!ref_prefix.empty()) {
+        bool found_ref_path = false;
+        graph->for_each_path_handle([&](path_handle_t path_handle) {
+                if (graph->get_path_name(path_handle).substr(0, ref_prefix.length()) == ref_prefix) {
+                    found_ref_path = true;
+                }
+                return !found_ref_path;
+            });
+        if (!found_ref_path) {
+            cerr << "[clip-vg] error: No path name begins with \"" << ref_prefix
+                 << "\" given with -e/--ref-prefix" << endl;
+            return 1;
+        }
+    }
+
     unordered_map<string, vector<pair<int64_t, int64_t>>> input_graph_intervals;
     if (!out_bed_path.empty()) {
         input_graph_intervals = get_path_intervals(graph.get());
