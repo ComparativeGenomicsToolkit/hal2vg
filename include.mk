@@ -15,7 +15,14 @@ include  ${sonLibRootPath}/include.mk
 CFLAGS += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath}
 CXXFLAGS += -std=c++14 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
 basicLibs = ${halPath}/libHal.a ${sonLibPath}/stPinchesAndCacti.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
-basicLibsDependencies = ${basicLibs}
+# note the := : basicLibsDependencies is used as make prerequisites, so it must
+# capture only the archives, before the -l flags below are appended
+basicLibsDependencies := ${basicLibs}
+
+# hal's hdf5Filters.cpp implements custom HDF5 lz4/zstd codecs, so libHal.a now
+# carries LZ4_/ZSTD_ references.  h5c++'s wrapper config doesn't pull these in,
+# so every binary linking libHal.a needs them spelled out.
+basicLibs += -llz4 -lzstd
 
 # hdf5 compilation is done through its wrappers.
 # we can speficy our own (sonlib) compilers with these variables:
