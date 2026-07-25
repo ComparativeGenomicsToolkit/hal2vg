@@ -30,7 +30,7 @@ void help(char** argv) {
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
        << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
-       << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
+       << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR, along with any node that no path visits forward" << endl
        << "    -c, --allow-cycle         Do not fail with error when reference cycle detected" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
