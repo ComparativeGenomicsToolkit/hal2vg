@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 43
+plan tests 47
 
 # how many steps of a given path still point backwards.  Reports instead of counting if the
 # graph is unusable or the path is missing, so that a crashed run leaving an empty output
@@ -23,6 +23,13 @@ ref_rev_steps() { # $1=graph  $2=path name
 all_rev_steps() { # $1=graph
     if ! vg validate "$1" > /dev/null 2>&1; then echo "invalid-graph"; return; fi
     vg view "$1" | awk '$1=="P" {print $3}' | tr ',' '\n' | grep -c -- '-$'
+}
+
+# the largest node id in the graph.  clip-vg's second invocation in cactus builds the clipped
+# graph and has to stay inside the id space the first one established, so it must never mint one.
+max_node_id() { # $1=graph
+    if ! vg validate "$1" > /dev/null 2>&1; then echo "invalid-graph"; return; fi
+    vg view "$1" | awk '$1=="S" {if ($2+0 > m) m = $2+0} END {print m+0}'
 }
 
 # forwardizing must never alter what the paths spell out
@@ -194,10 +201,22 @@ rm -f nr-cyc.vg nr-cyc-fwd.vg nr-cycm.vg nr-cycm-fwd.vg
 # nothing downstream can flip them, so clip-vg does it here.
 
 vg convert -g chop/nonref-rev.gfa -p > nr-rev.vg
-clip-vg nr-rev.vg -e x > nr-rev-fwd.vg
+clip-vg nr-rev.vg -e x -F > nr-rev-fwd.vg
 is "$?" "0" "a reverse-aligned non-reference contig forwardizes without error"
 is "$(ref_rev_steps nr-rev-fwd.vg samp.ctg)" "0" "nodes no path visits forward are flipped"
 is "$(same_path_seqs nr-rev.vg nr-rev-fwd.vg)" "0" "flipping non-reference nodes preserves path sequence"
+
+# -F mints node ids, so it must stay opt-in: cactus runs clip-vg a second time to build the
+# clipped graph, and that run has to keep the id space of the first one
+clip-vg nr-rev.vg -e x > nr-rev-noF.vg
+is "$(ref_rev_steps nr-rev-noF.vg samp.ctg)" "2" "without -F, nodes no path visits forward are left alone"
+is "$(vg stats -N nr-rev.vg)" "$(vg stats -N nr-rev-noF.vg)" "without -F the node count is unchanged"
+is "$(max_node_id nr-rev.vg)" "$(max_node_id nr-rev-noF.vg)" "without -F no new node ids are minted"
+
+clip-vg nr-rev.vg -F > nr-rev-badF.err 2>&1
+is "$?" "1" "-F without -e is an error"
+
+rm -f nr-rev-noF.vg nr-rev-badF.err
 
 # ... and a prefix matching no path is an error, caught before anything is clipped
 clip-vg nr-rev.vg -e no-such-prefix > nr-rev-none.vg 2> nr-rev-none.err
