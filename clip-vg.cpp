@@ -30,7 +30,10 @@ void help(char** argv) {
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
        << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
-       << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR, along with any node that no path visits forward" << endl
+       << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
+       << "    -F, --forwardize-nonref   Also forwardize any node that no path visits forward.  Needs -e." << endl
+       << "                              This mints new node ids, so it must not be used on a graph whose" << endl
+       << "                              id space has to stay compatible with one produced earlier." << endl
        << "    -c, --allow-cycle         Do not fail with error when reference cycle detected" << endl
        << "    -f, --force-clip          Don't abort with error if clipped node overlapped by multiple paths" << endl
        << "    -r, --name-replace S1>S2  Replace (first occurrence of) S1 with S2 in all path names" << endl
@@ -91,6 +94,7 @@ int main(int argc, char** argv) {
     int64_t max_unaligned = 0;
     string anchor_prefix;
     string ref_prefix;
+    bool forwardize_nonref = false;
     bool allow_ref_cycles = false;
     size_t input_count = 0;
     bool force_clip = false;
@@ -111,6 +115,7 @@ int main(int argc, char** argv) {
             {"max-unaligned", required_argument, 0, 'u'},
             {"anchor", required_argument, 0, 'a'},
             {"ref-prefix", required_argument, 0, 'e'},
+            {"forwardize-nonref", no_argument, 0, 'F'},
             {"allow-cycle", no_argument, 0, 'c'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
@@ -124,7 +129,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:a:e:cfnr:d:Lo:",
+        c = getopt_long (argc, argv, "hpb:m:u:a:e:Fcfnr:d:Lo:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -150,6 +155,9 @@ int main(int argc, char** argv) {
             break;
         case 'e':
             ref_prefix = optarg;
+            break;
+        case 'F':
+            forwardize_nonref = true;
             break;
         case 'c':
             allow_ref_cycles = true;
@@ -201,6 +209,11 @@ int main(int argc, char** argv) {
     if (optind != argc - 1) {
         cerr << "[clip-vg] error: too many arguments" << endl;
         help(argv);
+        return 1;
+    }
+
+    if (forwardize_nonref && ref_prefix.empty()) {
+        cerr << "[clip-vg] error: -F/--forwardize-nonref requires -e/--ref-prefix" << endl;
         return 1;
     }
 
@@ -308,7 +321,9 @@ int main(int argc, char** argv) {
 
     if (!ref_prefix.empty()) {
         forwardize_paths(graph.get(), ref_prefix, allow_ref_cycles, progress);
-        forwardize_nonref_paths(graph.get(), ref_prefix, progress);
+        if (forwardize_nonref) {
+            forwardize_nonref_paths(graph.get(), ref_prefix, progress);
+        }
     }
     
     if (!replace_list.empty()) {
