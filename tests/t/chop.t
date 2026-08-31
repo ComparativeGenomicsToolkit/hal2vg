@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 47
+plan tests 52
 
 # how many steps of a given path still point backwards.  Reports instead of counting if the
 # graph is unusable or the path is missing, so that a crashed run leaving an empty output
@@ -229,3 +229,47 @@ clip-vg nr-rev.vg -e no-such-prefix -u 5 > nr-rev-u.vg 2> nr-rev-u.err
 is "$?" "1" "a mistyped -e with -u fails instead of silently emitting an empty graph"
 
 rm -f nr-rev.vg nr-rev-fwd.vg nr-rev-none.vg nr-rev-none.err nr-rev-u.vg nr-rev-u.err
+
+# --- -o/--out-bed ------------------------------------------------------------------------------
+
+# -o reports what was clipped by diffing the input paths against the output ones, so it has to name
+# the path a subpath came from and give coordinates in that path's space.  Two things were wrong,
+# and neither shows on a graph whose paths carry no subranges -- where the key has no bracket to
+# strip and the offset is 0 either way -- so this clips twice to get a subranged graph first.
+{
+    printf 'H\tVN:Z:1.0\n'
+    for i in $(seq 12); do printf 'S\t%s\tACGTACGTAC\n' "$i"; done
+    for i in $(seq 11); do printf 'L\t%s\t+\t%s\t+\t0M\n' "$i" "$((i+1))"; done
+    seg="$(seq 12 | sed 's/$/+/' | paste -sd,)"
+    printf 'P\tREF#0#chr1\t%s\t*\n' "$seg"
+    printf 'P\tSAMP#0#chr1\t%s\t*\n' "$seg"
+    printf 'P\t_MINIGRAPH_#0#a\t1+,2+\t*\n'
+    printf 'P\t_MINIGRAPH_#0#b\t11+,12+\t*\n'
+} > outbed.gfa
+vg convert -g outbed.gfa -p > outbed.vg
+
+# nodes 3-10 are off the minigraph, so -u 50 clips the middle and leaves SAMP as two subpaths
+# carrying subranges: [0-20] and [100-120]
+clip-vg outbed.vg -f -e REF -a _MINIGRAPH_ -u 50 > outbed-sub.vg
+is "$(vg paths -L -x outbed-sub.vg 2>/dev/null | grep -c '^SAMP.*\[')" "2" "the first clip leaves subpaths carrying subranges"
+
+# now clip those away and report it.  -m clips whole paths, so the two intervals are exactly the
+# two subranges, and the BED must say so.
+clip-vg outbed-sub.vg -f -e REF -m 25 -o outbed.bed > outbed-clipped.vg
+
+# get_path_name() spells the subrange out as "name[start-end]", which files the record under a key
+# no input path has and no downstream consumer can join on
+is "$(grep -c '\[' outbed.bed)" "0" "-o names the path a subpath came from, not the subpath"
+
+# the offset came from subrange.second -- where the subpath ends -- rather than .first, which put
+# every interval a whole path-length to the right of the truth (20 40 / 120 140 here)
+is "$(awk '$1 ~ /^SAMP/ {print $2"-"$3}' outbed.bed | sort -t- -k1,1n | tr '\n' ' ' | sed 's/ *$//')" \
+   "0-20 100-120" "-o reports subpath intervals in the coordinates of the path they came from"
+
+# the help has always advertised --no-orphan-filter; only --no-orphan_filter was ever wired up
+clip-vg outbed.vg -f -e REF -a _MINIGRAPH_ -u 50 --no-orphan-filter > /dev/null 2>&1
+is "$?" "0" "the --no-orphan-filter spelling the help documents is accepted"
+clip-vg outbed.vg -f -e REF -a _MINIGRAPH_ -u 50 --no-orphan_filter > /dev/null 2>&1
+is "$?" "0" "and the --no-orphan_filter spelling that shipped still works"
+
+rm -f outbed.gfa outbed.vg outbed-sub.vg outbed.bed outbed-clipped.vg

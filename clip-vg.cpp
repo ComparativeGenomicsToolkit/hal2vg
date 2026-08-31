@@ -73,6 +73,21 @@ static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_interva
     const unordered_map<string, vector<pair<int64_t, int64_t>>>& output_intervals);
 
 // Create a subpath name (todo: make same function in vg consistent (it only includes start))
+// A path's name with any subrange stripped off, so that an input path and the subpaths clipped
+// out of it share a key.  get_path_name() spells the subrange out as "name[start-end]", which would
+// file every output subpath under a key no input path has.
+static inline string strip_subpath_name(const string& path_name) {
+    PathSense sense;
+    string sample;
+    string locus;
+    size_t haplotype;
+    size_t phase_block;
+    subrange_t subrange;
+    PathMetadata::parse_path_name(path_name, sense, sample, locus, haplotype, phase_block, subrange);
+    return PathMetadata::create_path_name(sense, sample, locus, haplotype, phase_block,
+                                          PathMetadata::NO_SUBRANGE);
+}
+
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
     PathSense sense;
     string sample;
@@ -119,6 +134,8 @@ int main(int argc, char** argv) {
             {"allow-cycle", no_argument, 0, 'c'},
             {"force-clip", no_argument, 0, 'f'},
             {"name-replace", required_argument, 0, 'r'},
+            {"no-orphan-filter", no_argument, 0, 'n'},
+            // the spelling that shipped, kept working so nobody's script breaks
             {"no-orphan_filter", no_argument, 0, 'n'},
             {"drop-prefix", required_argument, 0, 'd'},
             {"leave-aligned", no_argument, 0, 'L'},
@@ -1219,13 +1236,15 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
 unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph) {
     unordered_map<string, vector<pair<int64_t, int64_t>>> path_intervals;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
-            string path_name = graph->get_path_name(path_handle);
+            string path_name = strip_subpath_name(graph->get_path_name(path_handle));
             size_t path_len = 0;
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     path_len += graph->get_length(graph->get_handle_of_step(step_handle));
                 });
             subrange_t path_range = graph->get_subrange(path_handle);
-            int64_t start = path_range == PathMetadata::NO_SUBRANGE ? 0 : path_range.second;
+            // .first is where the subpath starts; .second is where it ends, and using that put
+            // every subpath's interval a whole path-length to the right of the truth
+            int64_t start = path_range == PathMetadata::NO_SUBRANGE ? 0 : (int64_t)path_range.first;
             vector<pair<int64_t, int64_t>>& intervals = path_intervals[path_name];        
             intervals.push_back(make_pair(start, start + path_len));
         });
@@ -1263,11 +1282,11 @@ static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_interva
             // and nothing overlaps
             int64_t j = 0;
             int64_t k = 0;
-            for (int64_t i = 0; i < in_intervals.size(); ++i) {
+            for (int64_t i = 0; i < (int64_t)in_intervals.size(); ++i) {
                 // j: first out_interval that's not completely left of in_interval;
-                for (; j < out_intervals.size() && out_intervals[j].second < in_intervals[i].first; ++j);
+                for (; j < (int64_t)out_intervals.size() && out_intervals[j].second < in_intervals[i].first; ++j);
                 // k: first out_interval that's completely right of in_interval
-                for (k = j; k < out_intervals.size() && out_intervals[k].first < in_intervals[i].second; ++k);
+                for (k = j; k < (int64_t)out_intervals.size() && out_intervals[k].first < in_intervals[i].second; ++k);
                 // [j, k) all out_intervals that are sub intervals of in_interval[i]
                 vector<pair<int64_t, int64_t>>&  gap_intervals = clipped_intervals[path_name];
                 if (k == j) {
@@ -1278,15 +1297,17 @@ static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_interva
                     if (out_intervals[j].first > in_intervals[i].first) {
                         gap_intervals.push_back(make_pair(in_intervals[i].first, out_intervals[j].first));
                     }
-                    // gaps between out_intervals
-                    for (int64_t l = 0; l < (int64_t)out_intervals.size() - 2; ++l) {
+                    // gaps between the out_intervals that fall inside this in_interval.  Bounded
+                    // by [j, k) rather than the whole vector: stopping at size - 2 dropped the last
+                    // gap, and scanning all of them reported every gap once per in_interval.
+                    for (int64_t l = j; l + 1 < k; ++l) {
                         if (out_intervals[l+1].first > out_intervals[l].second) {
                             gap_intervals.push_back(make_pair(out_intervals[l].second, out_intervals[l+1].first));
                         }
                     }
-                    // right of last interval
-                    if (in_intervals[i].second > out_intervals.back().second) {
-                        gap_intervals.push_back(make_pair(out_intervals.back().second, in_intervals[i].second));
+                    // right of the last interval inside this one
+                    if (in_intervals[i].second > out_intervals[k-1].second) {
+                        gap_intervals.push_back(make_pair(out_intervals[k-1].second, in_intervals[i].second));
                     }
                 }
             }
