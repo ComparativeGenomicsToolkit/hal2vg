@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 52
+plan tests 81
 
 # how many steps of a given path still point backwards.  Reports instead of counting if the
 # graph is unusable or the path is missing, so that a crashed run leaving an empty output
@@ -28,7 +28,9 @@ all_rev_steps() { # $1=graph
 # the largest node id in the graph.  clip-vg's second invocation in cactus builds the clipped
 # graph and has to stay inside the id space the first one established, so it must never mint one.
 max_node_id() { # $1=graph
-    if ! vg validate "$1" > /dev/null 2>&1; then echo "invalid-graph"; return; fi
+    # name the graph in the failure string: two invalid graphs must not compare equal, or an
+    # assertion that both sides are unchanged passes when both sides in fact crashed
+    if ! vg validate "$1" > /dev/null 2>&1; then echo "invalid-graph:$1"; return; fi
     vg view "$1" | awk '$1=="S" {if ($2+0 > m) m = $2+0} END {print m+0}'
 }
 
@@ -273,3 +275,229 @@ clip-vg outbed.vg -f -e REF -a _MINIGRAPH_ -u 50 --no-orphan_filter > /dev/null 
 is "$?" "0" "and the --no-orphan_filter spelling that shipped still works"
 
 rm -f outbed.gfa outbed.vg outbed-sub.vg outbed.bed outbed-clipped.vg
+# --- -k/--flank ------------------------------------------------------------------------------
+
+# Build a synthetic graph from a spec of <count>:<nodelen>:<aligned 0|1> segments.  REF and SAMP
+# run over every node; _MINIGRAPH_ covers only the aligned segments, so -a marks the rest unaligned.
+mkgraph() { # $1=out.gfa  $2=spec
+    awk -v spec="$2" 'BEGIN{
+        print "H\tVN:Z:1.0"
+        nseg=split(spec, S, " "); nid=0; allp=""
+        for (s=1; s<=nseg; s++) {
+            split(S[s], F, ":")
+            for (i=0; i<F[1]; i++) {
+                nid++; seq=""
+                for (j=0; j<F[2]; j++) seq = seq substr("ACGT", (j%4)+1, 1)
+                print "S\t" nid "\t" seq
+                allp = allp (allp=="" ? "" : ",") nid "+"
+                if (F[3]==1) mg[s] = (s in mg) ? mg[s] "," nid "+" : nid "+"
+            }
+        }
+        for (i=1; i<nid; i++) print "L\t" i "\t+\t" (i+1) "\t+\t0M"
+        print "P\tREF#0#chr1\t" allp "\t*"
+        print "P\tSAMP#0#chr1\t" allp "\t*"
+        for (s=1; s<=nseg; s++) if (s in mg) print "P\t_MINIGRAPH_#0#mg" s "\t" mg[s] "\t*"
+    }' > "$1"
+}
+
+# the surviving SAMP fragments, as a sorted list of start-end subranges
+samp_frags() { # $1=graph
+    # name the graph, so two crashed runs never compare equal (see max_node_id)
+    if ! vg validate "$1" > /dev/null 2>&1; then echo "invalid-graph:$1"; return; fi
+    vg paths -E -x "$1" 2>/dev/null | awk '$1 ~ /^SAMP/ {print $1}' \
+        | sed 's/.*\[//; s/\]//' | sort -t- -k1,1n | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# aligned(200) unaligned(500) aligned-island(200) unaligned(500) aligned(200)
+mkgraph island.gfa "2:100:1 5:100:0 2:100:1 5:100:0 2:100:1"
+vg convert -g island.gfa -p > island.vg
+
+clip-vg island.vg -f -e REF -a _MINIGRAPH_ -u 400 > island-u.vg
+is "$(samp_frags island-u.vg)" "0-200 700-900 1400-1600" "an aligned island between two clipped runs survives -u"
+
+# -k stops at that island rather than crossing it: the aligned nodes score negative and no
+# unaligned sequence resumes beyond them before the next clipped interval.
+clip-vg island.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 0.25 > island-k.vg
+is "$(samp_frags island-k.vg)" "0-200 700-900 1400-1600" "-k does not cross an aligned island"
+
+rm -f island.gfa island.vg island-u.vg island-k.vg
+
+# Two clipped runs separated by a gap that is mostly unaligned: aligned(20) unaligned(300)
+# aligned(20).  Mott's rule walks each interval across its near aligned stretch because unaligned
+# sequence resumes beyond it, so both extend into the gap and into each other.  chop_path cannot
+# take overlapping intervals, so they have to be collapsed.
+mkgraph collide.gfa "1:100:1 5:100:0 2:10:1 30:10:0 2:10:1 5:100:0 1:100:1"
+vg convert -g collide.gfa -p > collide.vg
+
+clip-vg collide.vg -f -e REF -a _MINIGRAPH_ -u 400 > collide-u.vg
+is "$(samp_frags collide-u.vg)" "0-100 600-940 1440-1540" "without -k the sub-threshold gap survives"
+
+clip-vg collide.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 0.25 > collide-k.vg
+is "$(samp_frags collide-k.vg)" "0-100 1440-1540" "-k extends two intervals into each other and they collapse"
+
+rm -f collide.gfa collide.vg collide-u.vg collide-k.vg
+
+# clean(400) fringe(390) anchor(10) unaligned(500) anchor(10) fringe(390) clean(400).  The fringe
+# is unaligned too, but in a run of 390 -- under -u 400, so -u leaves it and only -k can reach it.
+mkgraph flank.gfa "2:200:1 39:10:0 1:10:1 5:100:0 1:10:1 39:10:0 2:200:1"
+vg convert -g flank.gfa -p > flank.vg
+
+clip-vg flank.vg -f -e REF -a _MINIGRAPH_ -u 400 > flank-u.vg
+is "$(samp_frags flank-u.vg)" "0-800 1300-2100" "without -k the sub-threshold fringe survives"
+
+clip-vg flank.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 0.25 > flank-k.vg
+is "$(samp_frags flank-k.vg)" "0-400 1700-2100" "-k trims the unaligned fringe and stops at aligned sequence"
+is "$(vg paths -E -x flank-k.vg 2>/dev/null | awk '$1 ~ /^REF/ {print $2}')" "2100" "-k leaves the reference intact"
+is "$(max_node_id flank-u.vg)" "$(max_node_id flank-k.vg)" "-k mints no new node ids"
+
+clip-vg flank.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 100 -T 0.25 > flank-cap.vg
+is "$(samp_frags flank-cap.vg)" "0-700 1400-2100" "-k never trims further than its cap"
+
+rm -f flank.gfa flank.vg flank-u.vg flank-k.vg flank-cap.vg
+
+# A flank only 20% unaligned by base (20bp unaligned against 80bp anchored).  A wholly unaligned
+# flank goes at any threshold below 1, so it takes a mixed one to show that the threshold, rather
+# than the mere presence of unaligned sequence, is what decides how far the trim runs.
+mixed=""
+for i in $(seq 10); do mixed="$mixed 1:20:0 1:80:1"; done
+mkgraph mixed.gfa "2:200:1$mixed 5:100:0$mixed 2:200:1"
+vg convert -g mixed.gfa -p > mixed.vg
+
+# Below the threshold the whole flank goes.  The right edge stops at 2820 rather than 2900 because
+# the trim ends on the last *unaligned* node -- running out over the trailing 80bp one lowers the
+# score -- so the periodic pattern leaves the two sides a phase apart.
+clip-vg mixed.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 2000 -T 0.15 > mixed-lo.vg
+is "$(samp_frags mixed-lo.vg)" "0-400 2820-3300" "-k trims a 20% unaligned flank when the threshold is below it"
+
+# Above it neither side moves at all -- the first node each walk sees is 80bp of anchored sequence,
+# which at this threshold outscores the 20bp of unaligned beyond it.  Assert that against -u alone
+# rather than against a literal, so this stays a statement about -k doing nothing.  (The clipped
+# run is 520bp, not 500: the 5:100:0 block is followed immediately by the next 1:20:0.)
+clip-vg mixed.vg -f -e REF -a _MINIGRAPH_ -u 400 > mixed-none.vg
+clip-vg mixed.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 2000 -T 0.25 > mixed-hi.vg
+is "$(samp_frags mixed-hi.vg)" "$(samp_frags mixed-none.vg)" "-k trims nothing when the threshold is above the flank's density"
+
+# Everything above passes an explicit -T, so the default -- calibrating against the graph -- has
+# never run.  Here unaligned sequence is spread evenly and the graph is only 3300bp long, so no base sits
+# far enough from the clipped interval to measure a background rate from.  With nothing to compare
+# against, calibration has to refuse: treating an unsampled background as a clean one puts the
+# threshold at half the measured rate, which is below that rate by construction, so the walk never
+# turns negative and the trim runs to its -k cap over ordinary sequence.
+clip-vg mixed.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 2000 > mixed-auto.vg 2> mixed-auto.err
+is "$(samp_frags mixed-auto.vg)" "0-1400 1920-3300" "the default -T refuses to trim when it cannot sample a background"
+is "$(grep -c 'too little background' mixed-auto.err)" "1" "and says so without needing -p"
+
+# -0.0 is not less than zero, so an unnormalised "negative means calibrate" test would let it
+# through to threshold 0 -- where a long node scores 0 rather than negative and the walk can never
+# die.  Python's str(-0.0) is "-0.0", so a config can hand us one.
+clip-vg mixed.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 2000 -T -0 > mixed-negzero.vg 2>/dev/null
+is "$(samp_frags mixed-negzero.vg)" "0-1400 1920-3300" "-T -0 calibrates like any other negative, rather than trimming flat out"
+
+rm -f mixed.gfa mixed.vg mixed-lo.vg mixed-hi.vg mixed-none.vg mixed-auto.vg mixed-auto.err mixed-negzero.vg
+
+# The same calibration where there is a background to measure: 300kb of clean 200bp nodes on each
+# side, so sequence beyond the far window really is sampled, and the only unaligned sequence in
+# the graph is the 390bp fringe flanking the clipped interval.  Runs on defaults -- no -T.
+mkgraph calib.gfa "1500:200:1 39:10:0 1:10:1 5:100:0 1:10:1 39:10:0 1500:200:1"
+vg convert -g calib.gfa -p > calib.vg
+
+clip-vg calib.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 5000 > calib-k.vg 2> calib-k.err
+is "$(samp_frags calib-k.vg)" "0-300000 301300-601300" "the default -T trims exactly the fringe when it can sample a background"
+is "$(grep -c 'using threshold 0.039' calib-k.err)" "1" "and reports the threshold it calibrated to"
+
+rm -f calib.gfa calib.vg calib-k.vg calib-k.err
+
+# -b intervals, unlike the -u ones every case above uses, need not begin or end on a node boundary.
+# This graph is a palindrome and the interval is centred on it, both endpoints sitting 50bp inside
+# a clean 1000bp node, so whatever -k trims off one side it must trim off the other.  Scoring the
+# part of the straddled node that lies outside the interval is what keeps the two sides in step;
+# charging the whole node on one side and skipping it entirely on the other does not.
+mkgraph straddle.gfa "1:1000:1 5:20:0 1:1000:1 1:500:0 1:1000:1 5:20:0 1:1000:1"
+vg convert -g straddle.gfa -p > straddle.vg
+straddle_path="$(vg paths -E -x straddle.vg 2>/dev/null | awk '$1 ~ /^SAMP/ {print $1}')"
+printf '%s\t2050\t2650\n' "$straddle_path" > straddle.bed
+
+clip-vg straddle.vg -f -e REF -a _MINIGRAPH_ -b straddle.bed -k 3000 -T 0.2 > straddle-hi.vg
+is "$(samp_frags straddle-hi.vg)" "0-2050 2650-4700" "-k charges the straddled node on both sides, so neither side trims"
+
+clip-vg straddle.vg -f -e REF -a _MINIGRAPH_ -b straddle.bed -k 3000 -T 0.05 > straddle-lo.vg
+is "$(samp_frags straddle-lo.vg)" "0-1000 3700-4700" "-k still trims both flanks, symmetrically, at a lower threshold"
+
+rm -f straddle.gfa straddle.vg straddle.bed straddle-hi.vg straddle-lo.vg
+
+# Two clipped intervals with a clean, fully anchored island between them.  The island is 0%
+# unaligned, so -k has to stop at it: the sequence past it looks unaligned only because it is
+# itself being clipped, and a walk allowed to score that would drag the boundary across it.
+mkgraph nbr.gfa "2:200:1 5:100:0 3:100:1 25:20:0 2:200:1"
+vg convert -g nbr.gfa -p > nbr.vg
+
+clip-vg nbr.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 600 -T 0.15 > nbr-k.vg
+is "$(samp_frags nbr-k.vg)" "0-400 900-1200 1700-2100" "-k stops at a neighbouring clipped interval instead of scoring through it"
+
+rm -f nbr.gfa nbr.vg nbr-k.vg
+
+# Book-ended intervals are disjoint under half-open coordinates and load_bed accepts them.  The
+# merge pass is there to collapse the overlaps -k can create, so it has to leave these alone:
+# merging them would drop a breakpoint and quietly renumber what a plain -b run has always emitted.
+mkgraph abut.gfa "10:100:1"
+vg convert -g abut.gfa -p > abut.vg
+abut_path="$(vg paths -E -x abut.vg 2>/dev/null | awk '$1 ~ /^SAMP/ {print $1}')"
+printf '%s\t150\t250\n%s\t250\t350\n' "$abut_path" "$abut_path" > abut.bed
+
+# -k is what puts the merge pass in play; without it the pass is skipped and this asserts nothing.
+# Every node here is anchored, so no walk extends and the pass sees the two intervals as loaded.
+clip-vg abut.vg -f -e REF -b abut.bed -k 1000 -T 0.25 > abut-b.vg
+is "$(max_node_id abut-b.vg)" "13" "book-ended BED intervals keep the breakpoint they share"
+
+rm -f abut.gfa abut.vg abut.bed abut-b.vg
+
+# load_bed only rejects strict overlaps, so a file can carry an empty, inverted or off-the-end
+# record.  Both walks would repair one into a plausible interval that chop_path then honours,
+# turning a typo into deleted sequence -- and for a wholly off-path record, an abort into silence.
+# -k has to leave anything it cannot reason about exactly as it arrived.
+mkgraph degen.gfa "4:100:1 39:10:0 4:100:1"
+vg convert -g degen.gfa -p > degen.vg
+degen_path="$(vg paths -E -x degen.vg 2>/dev/null | awk '$1 ~ /^SAMP/ {print $1}')"
+
+for rec in "600 600" "700 650" "1190 1300"; do
+    printf '%s\t%s\t%s\n' "$degen_path" ${rec} > degen.bed
+    clip-vg degen.vg -f -e REF -b degen.bed > degen-b.vg 2>/dev/null
+    clip-vg degen.vg -f -e REF -a _MINIGRAPH_ -b degen.bed -k 1000 -T 0.25 > degen-k.vg 2>/dev/null
+    is "$(samp_frags degen-k.vg)" "$(samp_frags degen-b.vg)" "-k leaves a [$rec] BED record alone"
+done
+
+# wholly off the path: master aborts, and -k must not turn that into a clean exit
+printf '%s\t1500\t1600\n' "$degen_path" > degen.bed
+clip-vg degen.vg -f -e REF -b degen.bed > /dev/null 2>&1; degen_rc=$?
+clip-vg degen.vg -f -e REF -a _MINIGRAPH_ -b degen.bed -k 1000 -T 0.25 > /dev/null 2>&1
+is "$?" "$degen_rc" "-k does not convert an off-path BED record into a clean exit"
+
+rm -f degen.gfa degen.vg degen.bed degen-b.vg degen-k.vg
+
+# --- option handling ---------------------------------------------------------------------------
+
+mkgraph opt.gfa "10:100:1"
+vg convert -g opt.gfa -p > opt.vg
+
+# every node scores negative at or above 1, so no flank could ever be trimmed: say so up front
+# rather than run to completion having done nothing
+clip-vg opt.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 1 > /dev/null 2> opt-t1.err
+is "$?" "1" "-T at or above 1 is rejected instead of silently never trimming"
+
+# NaN passes both signbit and >= 1, then makes every score NaN so no comparison against the
+# running maximum is ever true: -k does nothing, exit 0, empty log.  Reject it instead.
+clip-vg opt.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T nan > /dev/null 2> opt-nan.err
+is "$?" "1" "-T nan is rejected rather than silently disabling -k"
+
+# 0 is in the documented range and is a coherent request -- extend unconditionally -- but at it an
+# aligned base scores 0 rather than negative, so the walk cannot die and every trim runs to the cap
+clip-vg opt.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 0 > /dev/null 2> opt-t0.err
+is "$(grep -c 'gates nothing' opt-t0.err)" "1" "-T 0 warns that it gates nothing"
+
+# -k needs intervals to act on, but a wrapper may pass it unconditionally and disable with 0,
+# so this warns rather than failing a job that is otherwise fine
+clip-vg opt.vg -f -e REF -k 1000 > /dev/null 2> opt-nosrc.err
+is "$?" "0" "-k without an interval source is not fatal"
+is "$(grep -c 'needs clipped intervals' opt-nosrc.err)" "1" "but it does warn"
+
+rm -f opt.gfa opt.vg opt-t1.err opt-nan.err opt-t0.err opt-nosrc.err
