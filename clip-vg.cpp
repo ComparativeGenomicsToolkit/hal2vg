@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <unistd.h>
 #include <getopt.h>
+#include <limits>
+#include <cmath>
 
 #include "bdsg/packed_graph.hpp"
 #include "bdsg/hash_graph.hpp"
@@ -30,6 +32,17 @@ void help(char** argv) {
        << "    -m, --min-length N        Only clip paths of length < N" << endl
        << "    -u, --max-unaligned N     Clip out unaligned regions of length > N" << endl
        << "    -a, --anchor PREFIX       If set, consider regions not aligned to a path with PREFIX unaligned (with -u)" << endl
+       << "    -k, --flank N             Extend each clipped interval outward by up to N bp for as long as" << endl
+       << "                              unaligned sequence stays dense (see -T), using the same test for" << endl
+       << "                              unaligned that -u does.  Removes the fringe left where an aligner" << endl
+       << "                              extended anchors into a repeat but not far enough to be clipped." << endl
+       << "                              N is the main control: inside a repeat the gate seldom closes" << endl
+       << "                              on its own, so the cap is what decides how much goes." << endl
+       << "    -T, --flank-threshold F   Keep extending while more than this fraction of bases are" << endl
+       << "                              unaligned (0-1).  Negative means calibrate against this graph," << endl
+       << "                              which is strongly advisable: how much unaligned sequence a" << endl
+       << "                              pangenome carries varies several-fold between graphs and is" << endl
+       << "                              not predictable from any input property [-1]" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
        << "    -F, --forwardize-nonref   Also forwardize any node that no path visits forward.  Needs -e." << endl
        << "                              This mints new node ids, so it must not be used on a graph whose" << endl
@@ -47,7 +60,10 @@ void help(char** argv) {
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stream, const string& ref_prefix);
 static unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                            const string& ref_prefix, const string& anchor_prefix);
+                                                                            const string& ref_prefix, const string& anchor_prefix,
+                                                                            const unordered_set<nid_t>& anchor_nodes);
+static void build_anchor_nodes(const PathHandleGraph* graph, const string& anchor_prefix,
+                               unordered_set<nid_t>& anchor_nodes_out);
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
 static vector<string> &split_delims(const string &s, const string& delims, vector<string> &elems);
 static void chop_path_intervals(MutablePathMutableHandleGraph* graph,
@@ -66,13 +82,39 @@ static void flip_node(MutablePathMutableHandleGraph* graph, nid_t node_id);
 static vector<unordered_set<nid_t>> weakly_connected_components(const HandleGraph* graph);
 static void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix, bool leave_aligned, bool progress);
 
+// Is this step aligned?  With an anchor prefix that means the node sits on one of those paths;
+// without one it means some other path visits the node.  find_unaligned uses this to cut intervals
+// and extend_flanks uses it to decide how far to extend them, so they never disagree.
+static bool step_is_aligned(const PathHandleGraph* graph, handle_t handle, path_handle_t path_handle,
+                            const unordered_set<nid_t>& anchor_nodes, bool have_anchor_prefix) {
+    if (anchor_nodes.count(graph->get_id(handle))) {
+        return true;
+    }
+    if (have_anchor_prefix) {
+        return false;
+    }
+    bool aligned = false;
+    graph->for_each_step_on_handle(handle, [&](step_handle_t other) {
+            if (graph->get_path_handle_of_step(other) != path_handle) {
+                aligned = true;
+            }
+            return !aligned;
+        });
+    return aligned;
+}
+
+static void extend_flanks(const PathHandleGraph* graph,
+                          unordered_map<string, vector<pair<int64_t, int64_t>>>& intervals,
+                          int64_t max_flank, double threshold,
+                          const unordered_set<nid_t>& anchor_nodes, bool have_anchor_prefix,
+                          bool progress);
+
 static unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph);
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_intervals(
     const unordered_map<string, vector<pair<int64_t, int64_t>>>& input_intervals,
     const unordered_map<string, vector<pair<int64_t, int64_t>>>& output_intervals);
 
-// Create a subpath name (todo: make same function in vg consistent (it only includes start))
 // A path's name with any subrange stripped off, so that an input path and the subpaths clipped
 // out of it share a key.  get_path_name() spells the subrange out as "name[start-end]", which would
 // file every output subpath under a key no input path has.
@@ -88,6 +130,7 @@ static inline string strip_subpath_name(const string& path_name) {
                                           PathMetadata::NO_SUBRANGE);
 }
 
+// Create a subpath name (todo: make same function in vg consistent (it only includes start))
 static inline string make_subpath_name(const string& path_name, size_t offset, size_t length) {
     PathSense sense;
     string sample;
@@ -105,8 +148,13 @@ static inline string make_subpath_name(const string& path_name, size_t offset, s
 int main(int argc, char** argv) {
 
     string bed_path;
+    // shared by find_unaligned and extend_flanks so both agree on what unaligned means
+    unordered_set<nid_t> anchor_nodes;
     int64_t min_length = 0;
     int64_t max_unaligned = 0;
+    int64_t flank = 0;
+    double flank_threshold = -1.;
+    bool flank_threshold_set = false;
     string anchor_prefix;
     string ref_prefix;
     bool forwardize_nonref = false;
@@ -129,6 +177,8 @@ int main(int argc, char** argv) {
             {"min-length", required_argument, 0, 'm'},
             {"max-unaligned", required_argument, 0, 'u'},
             {"anchor", required_argument, 0, 'a'},
+            {"flank", required_argument, 0, 'k'},
+            {"flank-threshold", required_argument, 0, 'T'},
             {"ref-prefix", required_argument, 0, 'e'},
             {"forwardize-nonref", no_argument, 0, 'F'},
             {"allow-cycle", no_argument, 0, 'c'},
@@ -146,7 +196,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:a:e:Fcfnr:d:Lo:",
+        c = getopt_long (argc, argv, "hpb:m:u:a:k:T:e:Fcfnr:d:Lo:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -169,6 +219,13 @@ int main(int argc, char** argv) {
             break;
         case 'a':
             anchor_prefix = optarg;
+            break;
+        case 'k':
+            flank = stol(optarg);
+            break;
+        case 'T':
+            flank_threshold = stod(optarg);
+            flank_threshold_set = true;
             break;
         case 'e':
             ref_prefix = optarg;
@@ -243,14 +300,63 @@ int main(int argc, char** argv) {
         cerr <<  "[clip-vg] error: at east one of -b, -m, -u, -e or -r must be specified" << endl;
         return 1;
     }
-    if (!anchor_prefix.empty() && max_unaligned <= 0) {
-        cerr << "[clip-vg] error: -a cannot be used without -u" << endl;
+    if (!anchor_prefix.empty() && max_unaligned <= 0 && flank <= 0) {
+        // -a used to matter only to -u.  It now also picks the test -k extends on, so it is
+        // meaningful alongside -b, where the intervals come from a file but the gate still has to
+        // decide what counts as unaligned.
+        cerr << "[clip-vg] error: -a cannot be used without -u or -k" << endl;
         return 1;
     }
     
     if (leave_aligned_drop_paths && drop_prefix.empty()) {
         cerr << "[clip-vg] error: -L can only be used with -d" << endl;
         return 1;
+    }
+
+    // -0.0 is not less than zero, so it would slip past the "negative means calibrate" test in
+    // extend_flanks() and land on threshold 0 -- the most aggressive setting there is, where a long
+    // node scores 0 rather than negative and the walk can never die on clean sequence.  Python's
+    // str(-0.0) is "-0.0", so a config carrying it reaches us in this form.  Normalise it here.
+    if (std::signbit(flank_threshold)) {
+        flank_threshold = -1.;
+    }
+    if (std::isnan(flank_threshold)) {
+        cerr << "[clip-vg] error: -T/--flank-threshold is not a number.  Every node would score NaN,"
+             << " no comparison against the running maximum would ever be true, and -k would do"
+             << " nothing at all without saying so.  Use a negative value to calibrate." << endl;
+        return 1;
+    }
+    if (flank_threshold >= 1.) {
+        cerr << "[clip-vg] error: -T/--flank-threshold must be less than 1: at 1 or above every"
+             << " node scores negative and no flank is ever trimmed.  Use a negative value to"
+             << " calibrate against the graph." << endl;
+        return 1;
+    }
+
+    // -k reshapes clipped intervals, so it needs a source of them.  -m makes exactly one interval
+    // per path, spanning the whole path, which leaves nothing outside to extend into.  Warn rather
+    // than fail: a wrapper may pass -k unconditionally and turn it off with -k 0, and failing a
+    // multi-hour job over that would be worse.
+    if (flank > 0) {
+        if (input_count == 0) {
+            cerr << "[clip-vg] warning: -k/--flank needs clipped intervals to act on, but none of"
+                 << " -b, -m or -u was given" << endl;
+        } else if (min_length != 0) {
+            cerr << "[clip-vg] warning: -k/--flank has no effect with -m/--min-length, which clips"
+                 << " whole paths" << endl;
+        }
+    }
+    if (flank_threshold_set && flank <= 0) {
+        cerr << "[clip-vg] warning: -T/--flank-threshold only applies with -k/--flank" << endl;
+    }
+    // 0 is in the documented range and is a coherent thing to ask for -- extend unconditionally,
+    // which is the no-gate control -- but it does not read that way, so say what it does.  An
+    // aligned base scores exactly 0 at this threshold rather than negative, so the running total
+    // never falls and the walk cannot die on aligned sequence.
+    if (flank > 0 && flank_threshold == 0.) {
+        cerr << "[clip-vg] warning: -T 0 gates nothing: aligned sequence scores 0 rather than"
+             << " negative, so every trim runs out to the -k cap.  Pass a positive threshold to"
+             << " gate on unaligned density, or a negative one to calibrate." << endl;
     }
 
     string graph_path = argv[optind++];
@@ -264,6 +370,11 @@ int main(int argc, char** argv) {
     if (progress) {
         cerr << "[clip-vg]: Loaded graph" << endl;
     }
+
+    // Both the interval search and the flank gate ask the same question of a node, so build the
+    // table once here.  -k can be used with -b, where find_unaligned never runs, and an empty
+    // table would make every node look unaligned.
+    build_anchor_nodes(graph.get(), anchor_prefix, anchor_nodes);
 
     // Catch a mistyped -e here, before anything has been clipped.  Unaligned regions are measured
     // against the reference, so a prefix that matches no path makes every base look unaligned and
@@ -321,15 +432,53 @@ int main(int argc, char** argv) {
             cerr << "[clip-vg]: Finding unaligned intervals >= " << max_unaligned
                  << " using anchor prefix " << anchor_prefix << " and ref prefix " << ref_prefix << endl;
         }
-        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, anchor_prefix);
+        bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, anchor_prefix,
+                                       anchor_nodes);
     }
     
+    if (flank > 0 && !bed_intervals.empty()) {
+        extend_flanks(graph.get(), bed_intervals, flank, flank_threshold, anchor_nodes,
+                      !anchor_prefix.empty(), progress);
+
+        // Mott's rule walks past a locally aligned stretch when unaligned sequence resumes beyond
+        // it, so two intervals with a short gap between them can each extend across it and end up
+        // overlapping.  chop_path requires sorted disjoint intervals, so collapse those.  Measured
+        // 3 collapses on a 118-haplotype chrY and 93 on chr21, so this is not a corner case.
+        size_t num_overlaps = 0;
+        for (auto& bi : bed_intervals) {
+            vector<pair<int64_t, int64_t>>& intervals = bi.second;
+            if (intervals.size() < 2) {
+                continue;
+            }
+            sort(intervals.begin(), intervals.end());
+            vector<pair<int64_t, int64_t>> merged;
+            merged.push_back(intervals[0]);
+            for (size_t i = 1; i < intervals.size(); ++i) {
+                // Only an actual overlap.  gap == 0 is book-ended, which load_bed has always
+                // accepted and chop_path has always handled -- merging those would drop a
+                // breakpoint and renumber the nodes a plain -b run has always emitted.
+                if (intervals[i].first < merged.back().second) {
+                    ++num_overlaps;
+                    merged.back().second = max(merged.back().second, intervals[i].second);
+                } else {
+                    merged.push_back(intervals[i]);
+                }
+            }
+            swap(intervals, merged);
+        }
+        if (progress && num_overlaps > 0) {
+            cerr << "[clip-vg]: Collapsed " << num_overlaps
+                 << " intervals that -k extended into each other" << endl;
+        }
+    }
+
     if (progress) {
         size_t num_intervals = 0;
         for (auto& bi : bed_intervals) {
             num_intervals += bi.second.size();
         }
-        cerr << "[clip-vg]: Loaded " << num_intervals << " BED intervals over " << bed_intervals.size() << " sequences" << endl;
+        cerr << "[clip-vg]: Clipping " << num_intervals << " intervals over " << bed_intervals.size()
+             << " sequences" << endl;
     }
 
     if (!bed_intervals.empty()) {
@@ -417,23 +566,28 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stre
     return intervals;
 }
 
-unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
-                                                                     const string& ref_prefix, const string& anchor_prefix) {
-    unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
-
-    // anchor-prefix means we consider a node unaligned if it doesn't align to a path with that prefix
-    // to do this check, we need a table of nodes on these paths:
-    unordered_set<nid_t> minigraph_nodes;
-    if (!anchor_prefix.empty()) {
-        graph->for_each_path_handle([&](path_handle_t path_handle) {
-                string path_name = graph->get_path_name(path_handle);
-                if (path_name.compare(0, anchor_prefix.length(), anchor_prefix) == 0) {
-                    graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
-                        minigraph_nodes.insert(graph->get_id(graph->get_handle_of_step(step_handle)));
-                    });
-                }
-            });
+// anchor-prefix means we consider a node unaligned if it doesn't align to a path with that prefix,
+// so we need a table of the nodes on those paths.  Built here rather than inside find_unaligned
+// because -k needs it too, and -k can be given with -b, where find_unaligned never runs.
+void build_anchor_nodes(const PathHandleGraph* graph, const string& anchor_prefix,
+                        unordered_set<nid_t>& anchor_nodes_out) {
+    if (anchor_prefix.empty()) {
+        return;
     }
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            string path_name = graph->get_path_name(path_handle);
+            if (path_name.compare(0, anchor_prefix.length(), anchor_prefix) == 0) {
+                graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                    anchor_nodes_out.insert(graph->get_id(graph->get_handle_of_step(step_handle)));
+                });
+            }
+        });
+}
+
+unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
+                                                                     const string& ref_prefix, const string& anchor_prefix,
+                                                                     const unordered_set<nid_t>& anchor_nodes) {
+    unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
     
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
@@ -443,15 +597,8 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathH
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         int64_t len = (int64_t)graph->get_length(handle);
-                        bool aligned = minigraph_nodes.count(graph->get_id(handle));
-                        if (!aligned && anchor_prefix.empty()) {
-                            graph->for_each_step_on_handle(handle, [&](step_handle_t step_handle_2) {
-                                if (graph->get_path_handle_of_step(step_handle_2) != path_handle) {
-                                    aligned = true;
-                                }
-                                return !aligned;
-                            });
-                        }
+                        bool aligned = step_is_aligned(graph, handle, path_handle, anchor_nodes,
+                                                       !anchor_prefix.empty());
                         // start an unaligned interval
                         if (start < 0 && aligned == false) {
                             start = offset;
@@ -1233,6 +1380,273 @@ void drop_paths(MutablePathMutableHandleGraph* graph, const string& drop_prefix,
         cerr << "[clip-vg]: Drop prefix removed " << removed_base_count << " bases from " << removed_node_count << " nodes in " << removed_path_count << " paths" << endl;        
     }
 }
+// Extend each clipped interval outward along its path for as long as unaligned sequence stays
+// dense, up to max_flank bp on each side.
+//
+// An aligner that extends an anchor into a repeat leaves a fringe: sequence that never reaches the
+// anchor graph, in runs too short for -u to clip.  So we score each base +(1-threshold) when it
+// is unaligned by the same test that cut the intervals, and -threshold otherwise, walk outward
+// and stop at the furthest point where the running total was at its maximum.  That is Mott's
+// trimming rule: the cut still lands past a locally aligned stretch if unaligned sequence resumes
+// beyond it, but a sustained aligned stretch ends the trim.
+//
+// Two consequences of that rule, both intended, neither obvious.  Aligned sequence inside a walk's
+// reach is removed -- crossing a local dip is the whole point, so an anchored stretch with fringe
+// on the far side of it goes.  And an island between two clipped intervals is approached from both
+// sides, so it survives only if it is wider than the two walks' reach combined, not one walk's.
+// When they do meet, every base between them was claimed by one walk or the other, so collapsing
+// the overlap downstream deletes nothing that was not already scored for deletion.
+void extend_flanks(const PathHandleGraph* graph,
+                   unordered_map<string, vector<pair<int64_t, int64_t>>>& intervals,
+                   int64_t max_flank, double threshold,
+                   const unordered_set<nid_t>& anchor_nodes, bool have_anchor_prefix,
+                   bool progress) {
+    int64_t total_added = 0;
+    size_t num_extended = 0;
+
+    // flatten a path into the length of the node at each step and the offset it starts at
+    auto flatten = [&](path_handle_t path_handle, vector<int64_t>& lengths, vector<int64_t>& offsets,
+                       vector<bool>& unaligned) {
+        lengths.clear();
+        offsets.clear();
+        unaligned.clear();
+        int64_t offset = 0;
+        graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                handle_t handle = graph->get_handle_of_step(step_handle);
+                int64_t len = graph->get_length(handle);
+                offsets.push_back(offset);
+                lengths.push_back(len);
+                unaligned.push_back(!step_is_aligned(graph, handle, path_handle, anchor_nodes,
+                                                     have_anchor_prefix));
+                offset += len;
+            });
+        return offset;
+    };
+
+    if (threshold < 0) {
+        // Calibrate against this graph rather than trusting a fixed number.  Over the 24 human
+        // chromosomes of a 460-haplotype pangenome the near-field fraction ran 0.10 to 0.45 and
+        // the threshold it implies 0.054 to 0.230 -- a 4.3x spread tracking neither haplotype
+        // count nor chromosome size, with chr8 lowest, chr13 highest, and a 118-haplotype chrY
+        // near the bottom.  A constant that gates one of those sensibly fails to gate another at
+        // all.  Compare sequence just outside the clipped intervals against sequence far from any
+        // of them, and put the threshold half way between.
+        //
+        // The two distances only have to bracket the fringe.  Its density decays over tens of kb,
+        // so 5kb is inside it on every graph measured, and 200kb is outside: the far-field
+        // fraction came back between 0.0036 and 0.0128 across those same 24 chromosomes, which is
+        // background even alongside the largest arrays.
+        const int64_t CALIB_NEAR = 5000;
+        const int64_t CALIB_FAR = 200000;
+        // Both samples need to be worth believing, but they are estimating opposite things, so
+        // the floors are on different quantities.  far is establishing that a rate is *low*, which
+        // takes length: at the 0.0036-0.0128 measured above, 100kb carries a few hundred unaligned
+        // bases.  near is pinning down a rate that is large, so what it needs is those bases
+        // themselves -- 500 of them, the same order 100kb of background yields, which at a 10-45%
+        // fringe is a few kb of band rather than 100.  Demanding 100kb of near as well would
+        // refuse any graph with a single clipped interval, where 10kb of band already carries a
+        // perfectly good sample.  They arrive in whole nodes rather than independently, so these
+        // are floors on plausibility, not confidence intervals.
+        const int64_t CALIB_MIN_FAR = 100000;
+        const int64_t CALIB_MIN_NEAR_UNALIGNED = 500;
+        int64_t near_tot = 0, near_unaligned = 0, far_tot = 0, far_unaligned = 0;
+        vector<int64_t> lengths, offsets;
+        vector<bool> unaligned;
+
+        for (auto& pi : intervals) {
+            if (!graph->has_path(pi.first)) {
+                continue;
+            }
+            flatten(graph->get_path_handle(pi.first), lengths, offsets, unaligned);
+            if (lengths.empty()) {
+                continue;
+            }
+            vector<int64_t> edges;
+            for (auto& interval : pi.second) {
+                edges.push_back(interval.first);
+                edges.push_back(interval.second);
+            }
+            sort(edges.begin(), edges.end());
+
+            for (size_t i = 0; i < lengths.size(); ++i) {
+                int64_t mid = offsets[i] + lengths[i] / 2;
+                // The intervals are disjoint and sorted, so edges alternate start,end,start,end...
+                // and a position sits inside one exactly when an odd number of edges precede it.
+                // Skip those -- they are going anyway -- without rescanning every interval.
+                size_t after = upper_bound(edges.begin(), edges.end(), mid) - edges.begin();
+                if (after % 2 == 1) {
+                    continue;
+                }
+                int64_t dist = numeric_limits<int64_t>::max();
+                if (after > 0) {
+                    dist = min(dist, mid - edges[after - 1]);
+                }
+                if (after < edges.size()) {
+                    dist = min(dist, edges[after] - mid);
+                }
+                if (dist <= CALIB_NEAR) {
+                    near_tot += lengths[i];
+                    if (unaligned[i]) near_unaligned += lengths[i];
+                } else if (dist >= CALIB_FAR) {
+                    far_tot += lengths[i];
+                    if (unaligned[i]) far_unaligned += lengths[i];
+                }
+            }
+        }
+
+        double near_frac = near_tot ? (double)near_unaligned / near_tot : 0.;
+        double far_frac = far_tot ? (double)far_unaligned / far_tot : 0.;
+        // An unsampled background is not a clean one.  Left ungated, far_tot == 0 gives far_frac 0
+        // -- the most permissive answer there is -- and the threshold below collapses to
+        // near_frac / 2, which on uniformly unaligned sequence sits under the background rate by
+        // construction: the walk never turns negative and every trim runs to its -k cap over
+        // ordinary sequence.  Nothing reaches the far bucket unless some path runs more than
+        // CALIB_FAR past a clipped interval, which no short contig does, and a handful of far bases
+        // estimates a fraction no better than none of them do.  Demand a real sample or decline.
+        // Both samples get a floor, and the same one.  near_frac sets the threshold directly --
+        // with the background this far below it, threshold is within a few percent of near/2 --
+        // so an unreliable near estimate is at least as damaging as an unreliable far one.
+        if (far_tot < CALIB_MIN_FAR) {
+            cerr << "[clip-vg]: Flank calibration sampled " << far_tot << "bp beyond " << CALIB_FAR
+                 << "bp of a clipped interval and wants " << CALIB_MIN_FAR << "bp: too little"
+                 << " background to estimate an unaligned rate from.  Skipping flank trimming --"
+                 << " pass -T explicitly to trim without calibrating." << endl;
+            return;
+        }
+        if (near_unaligned < CALIB_MIN_NEAR_UNALIGNED) {
+            cerr << "[clip-vg]: Flank calibration found " << near_unaligned << "bp of unaligned"
+                 << " sequence within " << CALIB_NEAR << "bp of a clipped interval and wants "
+                 << CALIB_MIN_NEAR_UNALIGNED << "bp: too little fringe to measure.  Skipping flank"
+                 << " trimming -- pass -T explicitly to trim without calibrating." << endl;
+            return;
+        }
+        // A fringe has to stand out from the background, not merely exceed it.  The guard below
+        // only bounds the sign of the difference, and a graph that is uniformly a few percent
+        // unaligned would pass it and then calibrate to a threshold under its own ambient rate --
+        // at which the walk never turns negative and every trim runs to the -k cap over ordinary
+        // sequence.  Measured separations are 21x to 97x across 24 human chromosomes, so 2x
+        // refuses the pathology without coming close to real data.
+        if (near_frac <= 2. * far_frac) {
+            cerr << "[clip-vg]: Flank calibration found no fringe to speak of (near " << near_frac
+                 << " vs far " << far_frac << ", less than 2x); skipping flank trimming" << endl;
+            return;
+        }
+        threshold = far_frac + 0.5 * (near_frac - far_frac);
+        // Unconditional, like the two refusals above: this number decides how much sequence -k
+        // deletes, it came from the graph rather than the command line, and a run that does not
+        // pass -p still needs it in its log to be reproducible.
+        cerr << "[clip-vg]: Flank calibration: " << near_frac << " of bases unaligned within "
+             << CALIB_NEAR << "bp of a clipped interval vs " << far_frac << " beyond "
+             << CALIB_FAR << "bp; using threshold " << threshold << endl;
+    }
+
+    for (auto& pi : intervals) {
+        if (!graph->has_path(pi.first)) {
+            continue;
+        }
+        path_handle_t path_handle = graph->get_path_handle(pi.first);
+
+        vector<int64_t> lengths;
+        vector<int64_t> offsets;
+        vector<bool> unaligned;
+        int64_t path_length = flatten(path_handle, lengths, offsets, unaligned);
+        if (lengths.empty()) {
+            continue;
+        }
+
+        // The score of one node, in Mott's formulation.  eff is how much of the node counts: the
+        // part of it that lies outside the interval being extended and outside the neighbouring
+        // intervals.  That is the whole node everywhere except at the two ends of a walk.
+        auto node_score = [&](size_t idx, int64_t eff) -> double {
+            return (unaligned[idx] ? (double)eff : 0.0) - threshold * (double)eff;
+        };
+
+        vector<pair<int64_t, int64_t>>& path_intervals = pi.second;
+        int64_t prev_end = 0;
+        for (size_t j = 0; j < path_intervals.size(); ++j) {
+            pair<int64_t, int64_t>& interval = path_intervals[j];
+            // Neither walk may score sequence that is already being clipped.  The intervals are
+            // sorted and disjoint here, and the inside of a neighbour is unaligned by construction
+            // -- that is why it was cut -- so a walk let into one would always find a new maximum
+            // there and drag the boundary across the surviving island in between.  Both bounds are
+            // the neighbours' original edges, so what an interval extends to does not depend on
+            // the order the intervals are visited in.
+            int64_t left_bound = prev_end;
+            int64_t right_bound = j + 1 < path_intervals.size() ? path_intervals[j + 1].first : path_length;
+            // Clamped and monotonic so a bad record below cannot hand the next interval a bound
+            // outside the path.  Identical to interval.second for anything well formed, since the
+            // intervals are sorted and disjoint.
+            prev_end = max(prev_end, min(interval.second, path_length));
+
+            // -b intervals come from a file, and load_bed only rejects strict overlaps: a record
+            // can be empty, inverted, or off the end of the path.  Both walks would repair such a
+            // record into a plausible interval that chop_path then honours, so a typo becomes
+            // deleted sequence -- and for a wholly off-path record it converts an abort into
+            // silent data loss.  Leave anything we cannot reason about exactly as it arrived, and
+            // let the code downstream treat it as it always has.
+            if (interval.first < 0 || interval.second > path_length ||
+                interval.first >= interval.second) {
+                continue;
+            }
+
+            // Walk left over [left_bound, interval.first), nearest node first.  A -b interval can
+            // begin inside a node -- the ones find_unaligned makes never do -- so the first node
+            // scored is whichever holds interval.first - 1, and only its part outside counts.
+            size_t start_idx = lower_bound(offsets.begin(), offsets.end(), interval.first) - offsets.begin();
+            double running = 0., best = 0.;
+            int64_t best_pos = interval.first;
+            for (int64_t i = (int64_t)start_idx - 1; i >= 0; --i) {
+                int64_t from = max(offsets[i], left_bound);
+                int64_t to = min(offsets[i] + lengths[i], interval.first);
+                if (to <= from || interval.first - from > max_flank) {
+                    break;
+                }
+                running += node_score(i, to - from);
+                if (running > best) {
+                    best = running;
+                    best_pos = from;
+                }
+            }
+            if (best_pos < interval.first) {
+                total_added += interval.first - best_pos;
+                ++num_extended;
+                interval.first = best_pos;
+            }
+
+            // and right over (interval.second, right_bound], starting likewise on the node that
+            // holds interval.second when the interval does not end on a boundary
+            size_t end_idx = lower_bound(offsets.begin(), offsets.end(), interval.second) - offsets.begin();
+            if (end_idx > 0 && offsets[end_idx - 1] + lengths[end_idx - 1] > interval.second) {
+                --end_idx;
+            }
+            running = 0.; best = 0.;
+            best_pos = interval.second;
+            for (size_t i = end_idx; i < lengths.size(); ++i) {
+                int64_t from = max(offsets[i], interval.second);
+                int64_t to = min(offsets[i] + lengths[i], right_bound);
+                if (to <= from || to - interval.second > max_flank) {
+                    break;
+                }
+                running += node_score(i, to - from);
+                if (running > best) {
+                    best = running;
+                    best_pos = to;
+                }
+            }
+            if (best_pos > interval.second) {
+                total_added += best_pos - interval.second;
+                ++num_extended;
+                interval.second = best_pos;
+            }
+        }
+    }
+
+    if (progress) {
+        cerr << "[clip-vg]: Extended " << num_extended << " interval ends by " << total_added
+             << " bp of unaligned flank" << endl;
+    }
+}
+
 unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph) {
     unordered_map<string, vector<pair<int64_t, int64_t>>> path_intervals;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
