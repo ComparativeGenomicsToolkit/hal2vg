@@ -36,6 +36,38 @@ static inline char upper_base(char c) {
     return (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
 }
 
+// A block that has already been converted parks its node id in its supporting-homology
+// count, which nothing needs once pinching is done.  A checksum of the node's sequence is
+// parked in the same field, in the bits above the id: that is what lets the per-sequence
+// check in pinch_to_handle confirm that the node really does spell what the hal says
+// without reading the node's bases back out of the graph, which on a 466-genome alignment
+// cost a fifth of the whole run.  The id gets the low 40 bits, so graphs of up to a
+// trillion nodes pack; anything past that is refused rather than silently truncated.
+static const unsigned BLOCK_ID_BITS = 40;
+static const uint64_t BLOCK_ID_LIMIT = (uint64_t)1 << BLOCK_ID_BITS;
+static const uint64_t BLOCK_ID_MASK = BLOCK_ID_LIMIT - 1;
+
+static inline uint64_t pack_block_node(uint64_t node_id, uint32_t checksum) {
+    return node_id | ((uint64_t)checksum << BLOCK_ID_BITS);
+}
+static inline uint64_t unpack_block_id(uint64_t packed) {
+    return packed & BLOCK_ID_MASK;
+}
+static inline uint32_t unpack_block_checksum(uint64_t packed) {
+    return (uint32_t)(packed >> BLOCK_ID_BITS);
+}
+
+// FNV-1a over the case-folded bases, truncated to the 22 bits that are free above the id.
+// Case is folded because the check it stands in for compared bases case-insensitively.
+static inline uint32_t sequence_checksum(const string& seq) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < seq.size(); ++i) {
+        h = (h ^ (unsigned char)upper_base(seq[i])) * 16777619u;
+    }
+    // fold the discarded bits back in rather than dropping them
+    return ((h >> 22) ^ h) & 0x3fffffu;
+}
+
 static void initParser(CLParser* optionsParser) {
     optionsParser->addArgument("halFile", "input hal file");
     optionsParser->addOption("refGenomes",
@@ -784,7 +816,8 @@ void pinch_to_handle(const Genome* genome,
             sequence->getSubString(seqString, segStart, stPinchSegment_getLength(seg));
 
             // have we already converted this block?
-            nid_t blockNode = block != nullptr ? (nid_t)stPinchBlock_getNumSupportingHomologies(block) : 0;
+            uint64_t blockPacked = block != nullptr ? stPinchBlock_getNumSupportingHomologies(block) : 0;
+            nid_t blockNode = (nid_t)unpack_block_id(blockPacked);
             if (blockNode == 0) {
                 // no: it is a new block
                 if (reversed) {
@@ -797,7 +830,17 @@ void pinch_to_handle(const Genome* genome,
                 }
                 if (block != nullptr) {
                     assert(graph.get_id(handle) > 0);
-                    stPinchBlock_setNumSupportingHomologies(block, (uint64_t)graph.get_id(handle));
+                    if ((uint64_t)graph.get_id(handle) >= BLOCK_ID_LIMIT) {
+                        // the count checked before conversion should have ruled this out;
+                        // refuse rather than truncate the id into the checksum bits
+                        throw runtime_error("node id " + std::to_string(graph.get_id(handle)) +
+                                            " does not fit the per-block node index");
+                    }
+                    // nodeString is only set in the reversed branch above; the node spells
+                    // seqString as it stands otherwise
+                    stPinchBlock_setNumSupportingHomologies(
+                        block, pack_block_node((uint64_t)graph.get_id(handle),
+                                               sequence_checksum(reversed ? nodeString : seqString)));
                 }
 #ifdef debug
                 cerr << "created node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
@@ -838,13 +881,40 @@ void pinch_to_handle(const Genome* genome,
             // trivially identical to it, so only a block first converted from some other
             // sequence can actually disagree
             if (blockNode != 0) {
-                nodeString = graph.get_sequence(handle);
-                for (size_t i = 0; i < nodeString.size() && i < seqString.size(); ++i) {
-                    if (upper_base(nodeString[i]) != upper_base(seqString[i])) {
-                        if (mismatches.size() < 10) {
-                            mismatches.push_back(make_pair(segStart + i, make_pair(nodeString[i], seqString[i])));
+                // the node's own bases are not read back: its checksum was stored on the
+                // block when it was created, so checksumming what the hal says here is
+                // enough to agree.  the length is compared too, which the old base-by-base
+                // loop did not do -- it stopped at the shorter of the two.
+                if (reversed) {
+                    nodeString = seqString;
+                    reverseComplement(nodeString);
+                }
+                bool lengthAgrees = graph.get_length(handle) == seqString.size();
+                bool checksumAgrees = sequence_checksum(reversed ? nodeString : seqString) ==
+                    unpack_block_checksum(blockPacked);
+                if (!lengthAgrees || !checksumAgrees) {
+                    // something is wrong: read the node out and say exactly what, which is
+                    // the only place that pays for the slow comparison
+                    nodeString = graph.get_sequence(handle);
+                    if (!lengthAgrees) {
+                        throw runtime_error("node " + std::to_string(blockNode) + " has length " +
+                                            std::to_string(nodeString.size()) + " but " +
+                                            sequence->getFullName() + " covers " +
+                                            std::to_string(seqString.size()) + " bases of it at " +
+                                            std::to_string(segStart));
+                    }
+                    for (size_t i = 0; i < nodeString.size() && i < seqString.size(); ++i) {
+                        if (upper_base(nodeString[i]) != upper_base(seqString[i])) {
+                            if (mismatches.size() < 10) {
+                                mismatches.push_back(make_pair(segStart + i, make_pair(nodeString[i], seqString[i])));
+                            }
+                            ++numMismatches;
                         }
-                        ++numMismatches;
+                    }
+                    if (numMismatches == 0) {
+                        throw runtime_error("checksum mismatch on node " + std::to_string(blockNode) +
+                                            " for " + sequence->getFullName() + " at " +
+                                            std::to_string(segStart) + ", but its bases agree");
                     }
                 }
             }
