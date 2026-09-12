@@ -30,6 +30,54 @@ using namespace handlegraph;
 using namespace bdsg;
 using namespace handlegraph;
 
+// std::toupper is locale-aware, and at one call per base it was about 4% of the runtime.
+// hal2vg never touches the locale, so in the C locale this is equivalent for every byte value.
+static inline char upper_base(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+}
+
+// The per-base pinch lists of one column.  This used to be a map<char, vector<...>> built and
+// thrown away for every column; here the storage is reused between columns, and the entries are
+// kept in ascending base order so that the pinches still happen in the order the map gave them.
+struct BasePinches {
+    typedef vector<tuple<stPinchThread*, hal_index_t, bool>> PinchList;
+
+    vector<char> bases;
+    vector<PinchList> lists;
+    size_t used = 0;
+
+    void clear() {
+        for (size_t i = 0; i < used; ++i) {
+            lists[i].clear();
+        }
+        used = 0;
+    }
+
+    PinchList& operator[](char base) {
+        size_t i = 0;
+        while (i < used && bases[i] < base) {
+            ++i;
+        }
+        if (i < used && bases[i] == base) {
+            return lists[i];
+        }
+        if (used == bases.size()) {
+            bases.push_back(0);
+            lists.push_back(PinchList());
+        }
+        // shift the later entries up to keep ascending order, moving the spare list into place
+        // rather than copying it; a column holds a handful of distinct bases at most
+        for (size_t j = used; j > i; --j) {
+            std::swap(bases[j], bases[j - 1]);
+            lists[j].swap(lists[j - 1]);
+        }
+        bases[i] = base;
+        lists[i].clear();
+        ++used;
+        return lists[i];
+    }
+};
+
 static void initParser(CLParser* optionsParser) {
     optionsParser->addArgument("halFile", "input hal file");
     optionsParser->addOption("refGenomes",
@@ -69,19 +117,29 @@ static void add_genome_threads(const Genome* genome,
 
 static void pinch_genome(const Genome* genome,
                          stPinchThreadSet* threads,
-                         unordered_map<string, int64_t>& nameToID,
+                         const unordered_map<string, int64_t>& nameToID,
                          const vector<string>& targetNames,
                          unordered_map<stPinchThread*, vector<bool>>& snp_cache);
 
 static void pinch_snp(const Genome* genome,
                       stPinchThreadSet* threads,
-                      unordered_map<string, int64_t>& nameToID,
+                      const unordered_map<string, int64_t>& nameToID,
                       const TopSegmentIteratorPtr& topIt,
                       int64_t topOffset,
                       ColumnIteratorPtr& colIt,
                       char topBase,
                       stPinchThread* topThread,
-                      unordered_map<stPinchThread*, vector<bool>>& snp_cache);
+                      unordered_map<stPinchThread*, vector<bool>>& snp_cache,
+                      unordered_map<const Sequence*, stPinchThread*>& seqToThread,
+                      BasePinches& base_pinches);
+
+// Map a hal sequence to its pinch thread.  Doing this by name, as this used to, built a
+// std::string and hashed it for every base of every column.  A sequence pointer is stable for as
+// long as its genome is open, which covers a whole pinch_genome call.
+static stPinchThread* thread_for_sequence(const Sequence* sequence,
+                                          stPinchThreadSet* threads,
+                                          const unordered_map<string, int64_t>& nameToID,
+                                          unordered_map<const Sequence*, stPinchThread*>& seqToThread);
 
 static void pinch_to_handle(const Genome* genome,
                             stPinchThreadSet* threadSet,
@@ -428,7 +486,7 @@ void add_genome_threads(const Genome* genome,
 // Use exact pairwise alginments from genome to its parent to make the pinch graph
 void pinch_genome(const Genome* genome,
                   stPinchThreadSet* threads,
-                  unordered_map<string, int64_t>& nameToID,
+                  const unordered_map<string, int64_t>& nameToID,
                   const vector<string>& targetNames,
                   unordered_map<stPinchThread*, vector<bool>>& snp_cache) {
 
@@ -450,6 +508,10 @@ void pinch_genome(const Genome* genome,
     const Sequence* botSeq = nullptr;
     stPinchThread* topThread = nullptr;
     stPinchThread* botThread = nullptr;
+    // sequence -> thread, so that no base costs a name lookup; and one reused set of per-base
+    // pinch lists for the columns visited below
+    unordered_map<const Sequence*, stPinchThread*> seqToThread;
+    BasePinches base_pinches;
     string topString;
     string botString;
 
@@ -465,17 +527,13 @@ void pinch_genome(const Genome* genome,
         if (topIt->tseg()->hasParent()) {
             botIt->toParent(topIt);
 
-            // todo: lots of string lookups
-            int64_t topID = nameToID[topIt->tseg()->getSequence()->getFullName()];
-            int64_t botID = nameToID[botIt->bseg()->getSequence()->getFullName()];
-
             if (topIt->tseg()->getSequence() != topSeq) {
                 topSeq = topIt->tseg()->getSequence();
-                topThread = stPinchThreadSet_getThread(threads, topID);
+                topThread = thread_for_sequence(topSeq, threads, nameToID, seqToThread);
             }
             if (botIt->bseg()->getSequence() != botSeq) {
                 botSeq = botIt->bseg()->getSequence();
-                botThread = stPinchThreadSet_getThread(threads, botID);
+                botThread = thread_for_sequence(botSeq, threads, nameToID, seqToThread);
             }
 
             topIt->getString(topString);
@@ -492,16 +550,19 @@ void pinch_genome(const Genome* genome,
             int64_t first_match = -1;
             int64_t last_match = -1;
             for (int64_t i = 0; i < (int64_t)topString.length(); ++i) {
-                if (std::toupper(topString[i]) == std::toupper(botString[i])) {
+                // these were four locale-aware toupper calls per base
+                const char topUpper = upper_base(topString[i]);
+                const char botUpper = upper_base(botString[i]);
+                if (topUpper == botUpper) {
                     if (first_match == -1) {
                         first_match = i;
                     }
                     last_match = i;
                 } else if (colIt.get() != NULL) {
                     pinch_snp(genome, threads, nameToID, topIt, i, colIt,
-                              std::toupper(topString[i]), topThread, snp_cache);
+                              topUpper, topThread, snp_cache, seqToThread, base_pinches);
                 }
-                if (std::toupper(topString[i]) != std::toupper(botString[i]) || i == (int64_t)topString.length() - 1) {
+                if (topUpper != botUpper || i == (int64_t)topString.length() - 1) {
                     if (last_match >= first_match && first_match >= 0) {
                         hal_index_t length = last_match - first_match + 1;
                         hal_index_t start1 = topIt->tseg()->getStartPosition() + first_match - topSeq->getStartPosition();
@@ -579,13 +640,15 @@ void pinch_genome(const Genome* genome,
 // by pinching snps then doing a pass over the graph to break them apart once its constructed.
 void pinch_snp(const Genome* genome,
                stPinchThreadSet* threads,
-               unordered_map<string, int64_t>& nameToID,
+               const unordered_map<string, int64_t>& nameToID,
                const TopSegmentIteratorPtr& topIt,
                int64_t topOffset,
                ColumnIteratorPtr& colIt,
                char topBase,
                stPinchThread* topThread,
-               unordered_map<stPinchThread*, vector<bool>>& snp_cache) {
+               unordered_map<stPinchThread*, vector<bool>>& snp_cache,
+               unordered_map<const Sequence*, stPinchThread*>& seqToThread,
+               BasePinches& base_pinches) {
 
     const Sequence* topSeq = topIt->tseg()->getSequence();
     hal_index_t topStart = topIt->tseg()->getStartPosition() + topOffset - topSeq->getStartPosition();
@@ -601,17 +664,16 @@ void pinch_snp(const Genome* genome,
 
     const ColumnIterator::ColumnMap* columnMap = colIt->getColumnMap();
 
-    // remember all equivalence classes of pinches
-    map<char, vector<tuple<stPinchThread*, hal_index_t, bool>>> base_pinches;
+    // remember all equivalence classes of pinches; the storage is the caller's and is reused
+    base_pinches.clear();
     
     // scan through all the homologous bases, breaking them into lists for each possible nucleotide
     for (ColumnIterator::ColumnMap::const_iterator cmi = columnMap->begin(); cmi != columnMap->end(); ++cmi) {
         const Sequence* sequence = cmi->first;
+        stPinchThread* otherThread = thread_for_sequence(sequence, threads, nameToID, seqToThread);
         for (ColumnIterator::DNASet::const_iterator dsi = cmi->second->begin(); dsi != cmi->second->end(); ++dsi) {
-            char botBase = std::toupper((*dsi)->getBase());
+            char botBase = upper_base((*dsi)->getBase());
             
-            int64_t otherID = nameToID[sequence->getFullName()];
-            stPinchThread* otherThread = stPinchThreadSet_getThread(threads, otherID);
             hal_index_t otherStart = (*dsi)->getArrayIndex() - sequence->getStartPosition();
 
             base_pinches[botBase].push_back(make_tuple(otherThread, otherStart, !(*dsi)->getReversed()));
@@ -620,8 +682,8 @@ void pinch_snp(const Genome* genome,
     }
 
     // pinch through each nucleotde
-    for (auto& bp : base_pinches) {
-        vector<tuple<stPinchThread*, hal_index_t, bool>>& other_positions = bp.second;
+    for (size_t bpi = 0; bpi < base_pinches.used; ++bpi) {
+        vector<tuple<stPinchThread*, hal_index_t, bool>>& other_positions = base_pinches.lists[bpi];
         for (size_t i = 0; i < other_positions.size(); ++i) {
             if (i > 0) {
                 stPinchThread_pinch(get<0>(other_positions[0]),
@@ -639,6 +701,24 @@ void pinch_snp(const Genome* genome,
             cache_vec[get<1>(other_positions[i])] = true;
         }
     }
+}
+
+static stPinchThread* thread_for_sequence(const Sequence* sequence,
+                                          stPinchThreadSet* threads,
+                                          const unordered_map<string, int64_t>& nameToID,
+                                          unordered_map<const Sequence*, stPinchThread*>& seqToThread) {
+    unordered_map<const Sequence*, stPinchThread*>::const_iterator cached = seqToThread.find(sequence);
+    if (cached != seqToThread.end()) {
+        return cached->second;
+    }
+    unordered_map<string, int64_t>::const_iterator found = nameToID.find(sequence->getFullName());
+    if (found == nameToID.end()) {
+        // operator[] used to insert a 0 here and carry on pinching the wrong thread
+        throw runtime_error("[hal2vg] no pinch thread for sequence " + sequence->getFullName());
+    }
+    stPinchThread* thread = stPinchThreadSet_getThread(threads, found->second);
+    seqToThread[sequence] = thread;
+    return thread;
 }
 
 // create nodes and edges for a genome using the pinch graph
@@ -759,7 +839,7 @@ void pinch_to_handle(const Genome* genome,
             if (blockNode != 0) {
                 nodeString = graph.get_sequence(handle);
                 for (size_t i = 0; i < nodeString.size() && i < seqString.size(); ++i) {
-                    if (toupper(nodeString[i]) != toupper(seqString[i])) {
+                    if (upper_base(nodeString[i]) != upper_base(seqString[i])) {
                         if (mismatches.size() < 10) {
                             mismatches.push_back(make_pair(segStart + i, make_pair(nodeString[i], seqString[i])));
                         }
