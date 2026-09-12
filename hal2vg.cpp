@@ -40,9 +40,9 @@ static inline char upper_base(char c) {
 // count, which nothing needs once pinching is done.  A checksum of the node's sequence is
 // parked in the same field, in the bits above the id: that is what lets the per-sequence
 // check in pinch_to_handle confirm that the node really does spell what the hal says
-// without reading the node's bases back out of the graph, which on a 466-genome alignment
-// cost a fifth of the whole run.  The id gets the low 40 bits, so graphs of up to a
-// trillion nodes pack; anything past that is refused rather than silently truncated.
+// without reading the node's bases back out of the graph, which it otherwise does once per
+// genome that touches the block.  The id gets the low 40 bits; a graph too big for that is
+// refused rather than silently truncated.
 static const unsigned BLOCK_ID_BITS = 40;
 static const uint64_t BLOCK_ID_LIMIT = (uint64_t)1 << BLOCK_ID_BITS;
 static const uint64_t BLOCK_ID_MASK = BLOCK_ID_LIMIT - 1;
@@ -495,8 +495,7 @@ void pinch_genome(const Genome* genome,
     const Sequence* botSeq = nullptr;
     stPinchThread* topThread = nullptr;
     stPinchThread* botThread = nullptr;
-    // sequence -> thread, so that no base costs a name lookup; and one reused set of per-base
-    // pinch lists for the columns visited below
+    // sequence -> thread, so that no base costs a name lookup
     unordered_map<const Sequence*, stPinchThread*> seqToThread;
 
     // merge up consecutive segments for fewer pinches
@@ -523,48 +522,47 @@ void pinch_genome(const Genome* genome,
             // the whole aligned segment is pinched, mismatching bases included; blocks
             // holding more than one base are separated afterwards by split_blocks_by_base.
             // not comparing the bases means neither sequence has to be read here at all
-            {
-                hal_index_t length = topIt->getLength();
-                hal_index_t start1 = topIt->tseg()->getStartPosition() - topSeq->getStartPosition();
-                hal_index_t start2;
-                if (!botIt->getReversed()) {
-                    start2 = botIt->bseg()->getStartPosition() - botSeq->getStartPosition();
-                } else {
-                    start2 = botIt->bseg()->getEndPosition() - length + 1 - botSeq->getStartPosition();
-                }
-                        // are we dealing with two consectuive segments? 
-                        bool canMerge = topThread == prevTopThread &&
-                           botThread == prevBotThread &&
-                           start1 == prevStart1 + prevLength &&
-                           botIt->getReversed() == prevReversed &&
-                           ((!prevReversed && start2 == prevStart2 + prevLength) ||
-                            (prevReversed && start2 + length == prevStart2));
+            hal_index_t length = topIt->getLength();
+            hal_index_t start1 = topIt->tseg()->getStartPosition() - topSeq->getStartPosition();
+            hal_index_t start2;
+            if (!botIt->getReversed()) {
+                start2 = botIt->bseg()->getStartPosition() - botSeq->getStartPosition();
+            } else {
+                start2 = botIt->bseg()->getEndPosition() - length + 1 - botSeq->getStartPosition();
+            }
 
-                        if (canMerge) {
-                            // if consecutive, just merge
-                            prevLength += length;
-                            if (botIt->getReversed()) {
-                                prevStart2 = start2;
-                            }
-                        } else {
-                            // otherwise
-                            if (prevTopThread != nullptr) {
-                                // pinch the last segment
-                                stPinchThread_pinch(prevTopThread,
-                                                    prevBotThread,
-                                                    prevStart1,
-                                                    prevStart2,
-                                                    prevLength,
-                                                    !prevReversed);
-                            }
-                            // and update our previous
-                            prevTopThread = topThread;
-                            prevBotThread = botThread;
-                            prevStart1 = start1;
-                            prevStart2 = start2;
-                            prevLength = length;
-                            prevReversed = botIt->getReversed();
-                        }
+            // are we dealing with two consecutive segments?
+            bool canMerge = topThread == prevTopThread &&
+                botThread == prevBotThread &&
+                start1 == prevStart1 + prevLength &&
+                botIt->getReversed() == prevReversed &&
+                ((!prevReversed && start2 == prevStart2 + prevLength) ||
+                 (prevReversed && start2 + length == prevStart2));
+
+            if (canMerge) {
+                // if consecutive, just merge
+                prevLength += length;
+                if (botIt->getReversed()) {
+                    prevStart2 = start2;
+                }
+            } else {
+                // otherwise
+                if (prevTopThread != nullptr) {
+                    // pinch the last segment
+                    stPinchThread_pinch(prevTopThread,
+                                        prevBotThread,
+                                        prevStart1,
+                                        prevStart2,
+                                        prevLength,
+                                        !prevReversed);
+                }
+                // and update our previous
+                prevTopThread = topThread;
+                prevBotThread = botThread;
+                prevStart1 = start1;
+                prevStart2 = start2;
+                prevLength = length;
+                prevReversed = botIt->getReversed();
             }
         }
     }
@@ -831,8 +829,8 @@ void pinch_to_handle(const Genome* genome,
                 if (block != nullptr) {
                     assert(graph.get_id(handle) > 0);
                     if ((uint64_t)graph.get_id(handle) >= BLOCK_ID_LIMIT) {
-                        // the count checked before conversion should have ruled this out;
-                        // refuse rather than truncate the id into the checksum bits
+                        // refuse rather than truncate the id into the checksum bits.  a node
+                        // needs at least one base, so this wants a graph of a trillion bases
                         throw runtime_error("node id " + std::to_string(graph.get_id(handle)) +
                                             " does not fit the per-block node index");
                     }
