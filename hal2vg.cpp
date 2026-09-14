@@ -30,6 +30,44 @@ using namespace handlegraph;
 using namespace bdsg;
 using namespace handlegraph;
 
+// std::toupper is locale-aware, and at one call per base it was about 4% of the runtime.
+// hal2vg never touches the locale, so in the C locale this is equivalent for every byte value.
+static inline char upper_base(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+}
+
+// A block that has already been converted parks its node id in its supporting-homology
+// count, which nothing needs once pinching is done.  A checksum of the node's sequence is
+// parked in the same field, in the bits above the id: that is what lets the per-sequence
+// check in pinch_to_handle confirm that the node really does spell what the hal says
+// without reading the node's bases back out of the graph, which it otherwise does once per
+// genome that touches the block.  The id gets the low 40 bits; a graph too big for that is
+// refused rather than silently truncated.
+static const unsigned BLOCK_ID_BITS = 40;
+static const uint64_t BLOCK_ID_LIMIT = (uint64_t)1 << BLOCK_ID_BITS;
+static const uint64_t BLOCK_ID_MASK = BLOCK_ID_LIMIT - 1;
+
+static inline uint64_t pack_block_node(uint64_t node_id, uint32_t checksum) {
+    return node_id | ((uint64_t)checksum << BLOCK_ID_BITS);
+}
+static inline uint64_t unpack_block_id(uint64_t packed) {
+    return packed & BLOCK_ID_MASK;
+}
+static inline uint32_t unpack_block_checksum(uint64_t packed) {
+    return (uint32_t)(packed >> BLOCK_ID_BITS);
+}
+
+// FNV-1a over the case-folded bases, truncated to the 22 bits that are free above the id.
+// Case is folded because the check it stands in for compared bases case-insensitively.
+static inline uint32_t sequence_checksum(const string& seq) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < seq.size(); ++i) {
+        h = (h ^ (unsigned char)upper_base(seq[i])) * 16777619u;
+    }
+    // fold the discarded bits back in rather than dropping them
+    return ((h >> 22) ^ h) & 0x3fffffu;
+}
+
 static void initParser(CLParser* optionsParser) {
     optionsParser->addArgument("halFile", "input hal file");
     optionsParser->addOption("refGenomes",
@@ -69,19 +107,30 @@ static void add_genome_threads(const Genome* genome,
 
 static void pinch_genome(const Genome* genome,
                          stPinchThreadSet* threads,
-                         unordered_map<string, int64_t>& nameToID,
-                         const vector<string>& targetNames,
-                         unordered_map<stPinchThread*, vector<bool>>& snp_cache);
+                         const unordered_map<string, int64_t>& nameToID);
 
-static void pinch_snp(const Genome* genome,
-                      stPinchThreadSet* threads,
-                      unordered_map<string, int64_t>& nameToID,
-                      const TopSegmentIteratorPtr& topIt,
-                      int64_t topOffset,
-                      ColumnIteratorPtr& colIt,
-                      char topBase,
-                      stPinchThread* topThread,
-                      unordered_map<stPinchThread*, vector<bool>>& snp_cache);
+// Pinching runs straight through mismatching bases, so a block can hold more than one base at
+// a position.  This separates them again: every block whose segments disagree anywhere is cut
+// at the positions where the grouping changes, and each such piece is repinched into one block
+// per base.  It is what the column iterator used to do one SNP at a time, without needing a
+// column iterator, a set of every genome open at once, or a bit per base of every sequence.
+static void split_blocks_by_base(stPinchThreadSet* threadSet,
+                                 const vector<const Sequence*>& IDToSequence,
+                                 bool progress);
+
+// thread name (the id given to add_genome_threads) -> the hal sequence it came from
+static void build_id_to_sequence(AlignmentConstPtr alignment,
+                                 const vector<string>& threadGenomes,
+                                 const unordered_map<string, int64_t>& nameToID,
+                                 vector<const Sequence*>& IDToSequence);
+
+// Map a hal sequence to its pinch thread.  Doing this by name, as this used to, built a
+// std::string and hashed it for every base of every segment.  A sequence pointer is stable for
+// as long as its genome is open, which covers a whole pinch_genome call.
+static stPinchThread* thread_for_sequence(const Sequence* sequence,
+                                          stPinchThreadSet* threads,
+                                          const unordered_map<string, int64_t>& nameToID,
+                                          unordered_map<const Sequence*, stPinchThread*>& seqToThread);
 
 static void pinch_to_handle(const Genome* genome,
                             stPinchThreadSet* threadSet,
@@ -246,6 +295,7 @@ int main(int argc, char** argv) {
         deque<string> queue = {rootGenomeName};
 
         vector<string> pinchGenomes;
+        vector<string> threadGenomes;
         
         while (!queue.empty()) {
             string genomeName = queue.front();
@@ -266,6 +316,7 @@ int main(int argc, char** argv) {
                     cerr << "adding threads from " << genome->getName() << endl;
                 }
                 add_genome_threads(genome, threadSet, IDToName, nameToID);
+                threadGenomes.push_back(genomeName);
             }
 
             if (!ignoreGenome && !curParent.empty() && genomeName != rootGenomeName) {
@@ -299,21 +350,27 @@ int main(int argc, char** argv) {
         }
 
         // do all the pinching
-        unordered_map<stPinchThread*, vector<bool>> snp_cache;
         for (size_t i = 0; i < pinchGenomes.size(); ++i) {
             
             // pinch the child with its parent
             if (progress) {
                 cerr << "pinching " << pinchGenomes[i] << endl;
             }
-            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID, targetNames, snp_cache);
+            pinch_genome(alignment->openGenome(pinchGenomes[i]), threadSet, nameToID);
         }
-        snp_cache.clear();
 
         // clean up the pinch graph
         if (progress) {
             cerr << "merging trivial segments and blocks in pinch graph" << endl;
         }
+        stPinchThreadSet_joinTrivialBoundaries(threadSet);
+
+        // the pinching above ran straight through mismatching bases, so blocks can hold more
+        // than one base at a position.  separate them, then merge again: what is left is
+        // blocks whose segments agree everywhere, which is what the graph needs
+        vector<const Sequence*> IDToSequence;
+        build_id_to_sequence(alignment, threadGenomes, nameToID, IDToSequence);
+        split_blocks_by_base(threadSet, IDToSequence, progress);
         stPinchThreadSet_joinTrivialBoundaries(threadSet);
 
         // building the pinch graph leaves the heap littered with small free chunks that the
@@ -428,30 +485,18 @@ void add_genome_threads(const Genome* genome,
 // Use exact pairwise alginments from genome to its parent to make the pinch graph
 void pinch_genome(const Genome* genome,
                   stPinchThreadSet* threads,
-                  unordered_map<string, int64_t>& nameToID,
-                  const vector<string>& targetNames,
-                  unordered_map<stPinchThread*, vector<bool>>& snp_cache) {
+                  const unordered_map<string, int64_t>& nameToID) {
 
     TopSegmentIteratorPtr topIt = genome->getTopSegmentIterator();
     BottomSegmentIteratorPtr botIt = genome->getParent()->getBottomSegmentIterator();
-
-    // make a target set for column iterator pinching. unfortunately this means
-    // opening every single genome
-    const Alignment* alignment = genome->getAlignment();
-    set<const Genome*> targets;
-    for (size_t i = 0; i < targetNames.size(); ++i) {
-        targets.insert(alignment->openGenome(targetNames[i]));
-    }
-
-    ColumnIteratorPtr colIt = genome->getColumnIterator(&targets);
 
     // avoid thread set lookups
     const Sequence* topSeq = nullptr;
     const Sequence* botSeq = nullptr;
     stPinchThread* topThread = nullptr;
     stPinchThread* botThread = nullptr;
-    string topString;
-    string botString;
+    // sequence -> thread, so that no base costs a name lookup
+    unordered_map<const Sequence*, stPinchThread*> seqToThread;
 
     // merge up consecutive segments for fewer pinches
     stPinchThread* prevTopThread = nullptr;
@@ -465,98 +510,60 @@ void pinch_genome(const Genome* genome,
         if (topIt->tseg()->hasParent()) {
             botIt->toParent(topIt);
 
-            // todo: lots of string lookups
-            int64_t topID = nameToID[topIt->tseg()->getSequence()->getFullName()];
-            int64_t botID = nameToID[botIt->bseg()->getSequence()->getFullName()];
-
             if (topIt->tseg()->getSequence() != topSeq) {
                 topSeq = topIt->tseg()->getSequence();
-                topThread = stPinchThreadSet_getThread(threads, topID);
+                topThread = thread_for_sequence(topSeq, threads, nameToID, seqToThread);
             }
             if (botIt->bseg()->getSequence() != botSeq) {
                 botSeq = botIt->bseg()->getSequence();
-                botThread = stPinchThreadSet_getThread(threads, botID);
+                botThread = thread_for_sequence(botSeq, threads, nameToID, seqToThread);
             }
 
-            topIt->getString(topString);
-            botIt->getString(botString);
+            // the whole aligned segment is pinched, mismatching bases included; blocks
+            // holding more than one base are separated afterwards by split_blocks_by_base.
+            // not comparing the bases means neither sequence has to be read here at all
+            hal_index_t length = topIt->getLength();
+            hal_index_t start1 = topIt->tseg()->getStartPosition() - topSeq->getStartPosition();
+            hal_index_t start2;
+            if (!botIt->getReversed()) {
+                start2 = botIt->bseg()->getStartPosition() - botSeq->getStartPosition();
+            } else {
+                start2 = botIt->bseg()->getEndPosition() - length + 1 - botSeq->getStartPosition();
+            }
 
-#ifdef debug
-            cerr << "pinching " << endl
-                 << "   " << *topIt << endl
-                 << "  " << topString << endl
-                 << "   " << *botIt << endl
-                 << "  " << botString << endl;
-#endif
+            // are we dealing with two consecutive segments?
+            bool canMerge = topThread == prevTopThread &&
+                botThread == prevBotThread &&
+                start1 == prevStart1 + prevLength &&
+                botIt->getReversed() == prevReversed &&
+                ((!prevReversed && start2 == prevStart2 + prevLength) ||
+                 (prevReversed && start2 + length == prevStart2));
 
-            int64_t first_match = -1;
-            int64_t last_match = -1;
-            for (int64_t i = 0; i < (int64_t)topString.length(); ++i) {
-                if (std::toupper(topString[i]) == std::toupper(botString[i])) {
-                    if (first_match == -1) {
-                        first_match = i;
-                    }
-                    last_match = i;
-                } else if (colIt.get() != NULL) {
-                    pinch_snp(genome, threads, nameToID, topIt, i, colIt,
-                              std::toupper(topString[i]), topThread, snp_cache);
+            if (canMerge) {
+                // if consecutive, just merge
+                prevLength += length;
+                if (botIt->getReversed()) {
+                    prevStart2 = start2;
                 }
-                if (std::toupper(topString[i]) != std::toupper(botString[i]) || i == (int64_t)topString.length() - 1) {
-                    if (last_match >= first_match && first_match >= 0) {
-                        hal_index_t length = last_match - first_match + 1;
-                        hal_index_t start1 = topIt->tseg()->getStartPosition() + first_match - topSeq->getStartPosition();
-                        hal_index_t start2;
-                        if (!botIt->getReversed()) {
-                            start2 = botIt->bseg()->getStartPosition() + first_match - botSeq->getStartPosition();
-                        } else {
-                            start2 = botIt->bseg()->getEndPosition() - first_match - length + 1 - botSeq->getStartPosition();
-                        }
-#ifdef debug
-                        cerr << " inserting (fm=" << first_match <<",lm=" << last_match << ", s1=" << start1 << ",s2=" << start2 << ",l=" << length
-                             << ", hl1=" << topSeq->getSequenceLength() << ",hl2=" << botSeq->getSequenceLength() << ",pl1=" << stPinchThread_getLength(topThread)
-                             << ", pl2=" << stPinchThread_getLength(botThread) << ", rev=" << botIt->getReversed()
-                             << " sp1g=" << (start1 + topSeq->getStartPosition()) << " sp2g=" << (start2 + botSeq->getStartPosition()) << endl
-                             << "   " << topString.substr(first_match, length) << endl;
-#endif
-                        // are we dealing with two consectuive segments? 
-                        bool canMerge = topThread == prevTopThread &&
-                           botThread == prevBotThread &&
-                           start1 == prevStart1 + prevLength &&
-                           botIt->getReversed() == prevReversed &&
-                           ((!prevReversed && start2 == prevStart2 + prevLength) ||
-                            (prevReversed && start2 + length == prevStart2));
-
-                        if (canMerge) {
-                            // if consecutive, just merge
-                            prevLength += length;
-                            if (botIt->getReversed()) {
-                                prevStart2 = start2;
-                            }
-                        } else {
-                            // otherwise
-                            if (prevTopThread != nullptr) {
-                                // pinch the last segment
-                                stPinchThread_pinch(prevTopThread,
-                                                    prevBotThread,
-                                                    prevStart1,
-                                                    prevStart2,
-                                                    prevLength,
-                                                    !prevReversed);
-                            }
-                            // and update our previous
-                            prevTopThread = topThread;
-                            prevBotThread = botThread;
-                            prevStart1 = start1;
-                            prevStart2 = start2;
-                            prevLength = length;
-                            prevReversed = botIt->getReversed();
-                        }
-                                                
-                    }
-                    first_match = -1;
-                    last_match = -1;
+            } else {
+                // otherwise
+                if (prevTopThread != nullptr) {
+                    // pinch the last segment
+                    stPinchThread_pinch(prevTopThread,
+                                        prevBotThread,
+                                        prevStart1,
+                                        prevStart2,
+                                        prevLength,
+                                        !prevReversed);
                 }
-            }            
+                // and update our previous
+                prevTopThread = topThread;
+                prevBotThread = botThread;
+                prevStart1 = start1;
+                prevStart2 = start2;
+                prevLength = length;
+                prevReversed = botIt->getReversed();
+            }
         }
     }
     // do that last pinch
@@ -570,75 +577,179 @@ void pinch_genome(const Genome* genome,
     }
 }
 
-// Use the column iterator to find all alignments of this snp and pinch accordingly
-//
-// Todo:  Worried this might be too slow to use at scale.  Also, it blows away all previous
-// efforts in hal2vg to be cache-friendly by only loading 2 genomes at a time, so it may
-// hog lots of memory.  On a star tree, it may just be better to manually scan the siblings
-// before resorting to the column iterator.  Or perhaps do everything in the pinch graph
-// by pinching snps then doing a pass over the graph to break them apart once its constructed.
-void pinch_snp(const Genome* genome,
-               stPinchThreadSet* threads,
-               unordered_map<string, int64_t>& nameToID,
-               const TopSegmentIteratorPtr& topIt,
-               int64_t topOffset,
-               ColumnIteratorPtr& colIt,
-               char topBase,
-               stPinchThread* topThread,
-               unordered_map<stPinchThread*, vector<bool>>& snp_cache) {
-
-    const Sequence* topSeq = topIt->tseg()->getSequence();
-    hal_index_t topStart = topIt->tseg()->getStartPosition() + topOffset - topSeq->getStartPosition();
-
-    vector<bool>& cache_rec = snp_cache[topThread];
-    if (!cache_rec.empty() && cache_rec[topStart] == true) {
-        // we've already pinched this base
-        return;
+void build_id_to_sequence(AlignmentConstPtr alignment,
+                          const vector<string>& threadGenomes,
+                          const unordered_map<string, int64_t>& nameToID,
+                          vector<const Sequence*>& IDToSequence) {
+    IDToSequence.assign(nameToID.size(), nullptr);
+    for (size_t i = 0; i < threadGenomes.size(); ++i) {
+        const Genome* genome = alignment->openGenome(threadGenomes[i]);
+        for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
+            const Sequence* sequence = seqIt->getSequence();
+            unordered_map<string, int64_t>::const_iterator found = nameToID.find(sequence->getFullName());
+            if (found != nameToID.end()) {
+                IDToSequence.at(found->second) = sequence;
+            }
+        }
     }
+}
 
-    // move the column iterator into position
-    colIt->toSite(topStart + topSeq->getStartPosition(), topStart + topSeq->getStartPosition() + 1);
+// one segment of the block being examined
+namespace {
+struct BlockMember {
+    stPinchThread* thread;
+    int64_t start;    // of the segment, in thread coordinates
+    bool forward;     // the segment's orientation within the block
+    string bases;     // block-relative and upper case, so the members line up position by position
+};
 
-    const ColumnIterator::ColumnMap* columnMap = colIt->getColumnMap();
+// Number the members of a block at one position by which base they carry, first base seen
+// getting group 0.  Two positions belong in the same block exactly when this is the same at
+// both, whatever the bases themselves are.
+inline void grouping_at(const vector<BlockMember>& members, int64_t position, vector<uint32_t>& key,
+                        uint32_t* base_stamp, uint32_t* base_group, uint32_t& stamp) {
+    ++stamp;
+    key.resize(members.size());
+    uint32_t next_group = 0;
+    for (size_t i = 0; i < members.size(); ++i) {
+        unsigned char base = (unsigned char)members[i].bases[position];
+        if (base_stamp[base] != stamp) {
+            base_stamp[base] = stamp;
+            base_group[base] = next_group++;
+        }
+        key[i] = base_group[base];
+    }
+}
+}
 
-    // remember all equivalence classes of pinches
-    map<char, vector<tuple<stPinchThread*, hal_index_t, bool>>> base_pinches;
-    
-    // scan through all the homologous bases, breaking them into lists for each possible nucleotide
-    for (ColumnIterator::ColumnMap::const_iterator cmi = columnMap->begin(); cmi != columnMap->end(); ++cmi) {
-        const Sequence* sequence = cmi->first;
-        for (ColumnIterator::DNASet::const_iterator dsi = cmi->second->begin(); dsi != cmi->second->end(); ++dsi) {
-            char botBase = std::toupper((*dsi)->getBase());
-            
-            int64_t otherID = nameToID[sequence->getFullName()];
-            stPinchThread* otherThread = stPinchThreadSet_getThread(threads, otherID);
-            hal_index_t otherStart = (*dsi)->getArrayIndex() - sequence->getStartPosition();
+void split_blocks_by_base(stPinchThreadSet* threadSet,
+                          const vector<const Sequence*>& IDToSequence,
+                          bool progress) {
 
-            base_pinches[botBase].push_back(make_tuple(otherThread, otherStart, !(*dsi)->getReversed()));
-            
+    vector<BlockMember> members;
+    vector<uint32_t> key, next_key;
+    vector<int64_t> group_first;
+    string buffer;
+    uint32_t base_stamp[256] = {0};
+    uint32_t base_group[256] = {0};
+    uint32_t stamp = 0;
+    size_t blocks_split = 0;
+
+    // the block of a segment is visited when its first segment is reached, which is how the
+    // block iterator does it.  the repinching below splits segments to the right of the one
+    // in hand and makes new blocks, all of which agree by construction: reaching one of those
+    // later costs a second read of its bases and nothing else
+    stPinchThreadSetSegmentIt segIt = stPinchThreadSet_getSegmentIt(threadSet);
+    for (stPinchSegment* seg = stPinchThreadSetSegmentIt_getNext(&segIt); seg != NULL;
+         seg = stPinchThreadSetSegmentIt_getNext(&segIt)) {
+
+        stPinchBlock* block = stPinchSegment_getBlock(seg);
+        if (block == NULL || stPinchBlock_getFirst(block) != seg || stPinchBlock_getDegree(block) < 2) {
+            continue;
+        }
+        const int64_t length = stPinchBlock_getLength(block);
+
+        // read what every member of the block says, in the block's orientation
+        members.clear();
+        stPinchBlockIt blockIt = stPinchBlock_getSegmentIterator(block);
+        for (stPinchSegment* member = stPinchBlockIt_getNext(&blockIt); member != NULL;
+             member = stPinchBlockIt_getNext(&blockIt)) {
+            const Sequence* sequence = IDToSequence.at(stPinchSegment_getName(member));
+            if (sequence == nullptr) {
+                throw runtime_error("[hal2vg] no hal sequence for pinch thread " +
+                                    std::to_string(stPinchSegment_getName(member)));
+            }
+            BlockMember entry;
+            entry.thread = stPinchSegment_getThread(member);
+            entry.start = stPinchSegment_getStart(member);
+            entry.forward = stPinchSegment_getBlockOrientation(member) != 0;
+            sequence->getSubString(buffer, entry.start, length);
+            for (size_t i = 0; i < buffer.size(); ++i) {
+                buffer[i] = upper_base(buffer[i]);
+            }
+            if (!entry.forward) {
+                reverseComplement(buffer);
+            }
+            entry.bases = buffer;
+            members.push_back(entry);
+        }
+
+        // the common case by far: every member says the same thing everywhere
+        bool disagrees = false;
+        for (int64_t position = 0; position < length && !disagrees; ++position) {
+            for (size_t i = 1; i < members.size(); ++i) {
+                if (members[i].bases[position] != members[0].bases[position]) {
+                    disagrees = true;
+                    break;
+                }
+            }
+        }
+        if (!disagrees) {
+            continue;
+        }
+        ++blocks_split;
+
+        // rebuild the block as one block per run of positions that group the same way.  the
+        // segments keep their coordinates through this, so the members stay usable, and
+        // repinching splits them wherever a run ends
+        stPinchBlock_destruct(block);
+        block = NULL;
+
+        grouping_at(members, 0, key, base_stamp, base_group, stamp);
+        int64_t run_start = 0;
+        for (int64_t position = 1; position <= length; ++position) {
+            bool end_of_block = (position == length);
+            if (!end_of_block) {
+                grouping_at(members, position, next_key, base_stamp, base_group, stamp);
+            }
+            if (!end_of_block && next_key == key) {
+                continue;
+            }
+            // close the run [run_start, position): pinch each member onto the first member
+            // that carries its base, and leave a member whose base is unique unpinched
+            const int64_t run_length = position - run_start;
+            group_first.assign(members.size(), -1);
+            for (size_t i = 0; i < members.size(); ++i) {
+                int64_t& first = group_first[key[i]];
+                if (first < 0) {
+                    first = (int64_t)i;
+                    continue;
+                }
+                const BlockMember& to = members[first];
+                const BlockMember& from = members[i];
+                int64_t to_start = to.forward ? to.start + run_start : to.start + length - position;
+                int64_t from_start = from.forward ? from.start + run_start : from.start + length - position;
+                stPinchThread_pinch(to.thread, from.thread, to_start, from_start, run_length,
+                                    to.forward == from.forward);
+            }
+            run_start = position;
+            if (!end_of_block) {
+                key.swap(next_key);
+            }
         }
     }
 
-    // pinch through each nucleotde
-    for (auto& bp : base_pinches) {
-        vector<tuple<stPinchThread*, hal_index_t, bool>>& other_positions = bp.second;
-        for (size_t i = 0; i < other_positions.size(); ++i) {
-            if (i > 0) {
-                stPinchThread_pinch(get<0>(other_positions[0]),
-                                    get<0>(other_positions[i]),
-                                    get<1>(other_positions[0]),
-                                    get<1>(other_positions[i]),
-                                    1,
-                                    get<2>(other_positions[0]) == get<2>(other_positions[i]));
-            }
-            // update the cache
-            vector<bool>& cache_vec = snp_cache[get<0>(other_positions[i])];
-            if (cache_vec.empty()) {
-                cache_vec.resize(stPinchThread_getLength(get<0>(other_positions[i])), false);
-            }
-            cache_vec[get<1>(other_positions[i])] = true;
-        }
+    if (progress) {
+        cerr << "separated " << blocks_split << " blocks whose members disagreed" << endl;
     }
+}
+
+static stPinchThread* thread_for_sequence(const Sequence* sequence,
+                                          stPinchThreadSet* threads,
+                                          const unordered_map<string, int64_t>& nameToID,
+                                          unordered_map<const Sequence*, stPinchThread*>& seqToThread) {
+    unordered_map<const Sequence*, stPinchThread*>::const_iterator cached = seqToThread.find(sequence);
+    if (cached != seqToThread.end()) {
+        return cached->second;
+    }
+    unordered_map<string, int64_t>::const_iterator found = nameToID.find(sequence->getFullName());
+    if (found == nameToID.end()) {
+        // operator[] used to insert a 0 here and carry on pinching the wrong thread
+        throw runtime_error("[hal2vg] no pinch thread for sequence " + sequence->getFullName());
+    }
+    stPinchThread* thread = stPinchThreadSet_getThread(threads, found->second);
+    seqToThread[sequence] = thread;
+    return thread;
 }
 
 // create nodes and edges for a genome using the pinch graph
@@ -703,7 +814,8 @@ void pinch_to_handle(const Genome* genome,
             sequence->getSubString(seqString, segStart, stPinchSegment_getLength(seg));
 
             // have we already converted this block?
-            nid_t blockNode = block != nullptr ? (nid_t)stPinchBlock_getNumSupportingHomologies(block) : 0;
+            uint64_t blockPacked = block != nullptr ? stPinchBlock_getNumSupportingHomologies(block) : 0;
+            nid_t blockNode = (nid_t)unpack_block_id(blockPacked);
             if (blockNode == 0) {
                 // no: it is a new block
                 if (reversed) {
@@ -716,7 +828,17 @@ void pinch_to_handle(const Genome* genome,
                 }
                 if (block != nullptr) {
                     assert(graph.get_id(handle) > 0);
-                    stPinchBlock_setNumSupportingHomologies(block, (uint64_t)graph.get_id(handle));
+                    if ((uint64_t)graph.get_id(handle) >= BLOCK_ID_LIMIT) {
+                        // refuse rather than truncate the id into the checksum bits.  a node
+                        // needs at least one base, so this wants a graph of a trillion bases
+                        throw runtime_error("node id " + std::to_string(graph.get_id(handle)) +
+                                            " does not fit the per-block node index");
+                    }
+                    // nodeString is only set in the reversed branch above; the node spells
+                    // seqString as it stands otherwise
+                    stPinchBlock_setNumSupportingHomologies(
+                        block, pack_block_node((uint64_t)graph.get_id(handle),
+                                               sequence_checksum(reversed ? nodeString : seqString)));
                 }
 #ifdef debug
                 cerr << "created node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
@@ -757,13 +879,40 @@ void pinch_to_handle(const Genome* genome,
             // trivially identical to it, so only a block first converted from some other
             // sequence can actually disagree
             if (blockNode != 0) {
-                nodeString = graph.get_sequence(handle);
-                for (size_t i = 0; i < nodeString.size() && i < seqString.size(); ++i) {
-                    if (toupper(nodeString[i]) != toupper(seqString[i])) {
-                        if (mismatches.size() < 10) {
-                            mismatches.push_back(make_pair(segStart + i, make_pair(nodeString[i], seqString[i])));
+                // the node's own bases are not read back: its checksum was stored on the
+                // block when it was created, so checksumming what the hal says here is
+                // enough to agree.  the length is compared too, which the old base-by-base
+                // loop did not do -- it stopped at the shorter of the two.
+                if (reversed) {
+                    nodeString = seqString;
+                    reverseComplement(nodeString);
+                }
+                bool lengthAgrees = graph.get_length(handle) == seqString.size();
+                bool checksumAgrees = sequence_checksum(reversed ? nodeString : seqString) ==
+                    unpack_block_checksum(blockPacked);
+                if (!lengthAgrees || !checksumAgrees) {
+                    // something is wrong: read the node out and say exactly what, which is
+                    // the only place that pays for the slow comparison
+                    nodeString = graph.get_sequence(handle);
+                    if (!lengthAgrees) {
+                        throw runtime_error("node " + std::to_string(blockNode) + " has length " +
+                                            std::to_string(nodeString.size()) + " but " +
+                                            sequence->getFullName() + " covers " +
+                                            std::to_string(seqString.size()) + " bases of it at " +
+                                            std::to_string(segStart));
+                    }
+                    for (size_t i = 0; i < nodeString.size() && i < seqString.size(); ++i) {
+                        if (upper_base(nodeString[i]) != upper_base(seqString[i])) {
+                            if (mismatches.size() < 10) {
+                                mismatches.push_back(make_pair(segStart + i, make_pair(nodeString[i], seqString[i])));
+                            }
+                            ++numMismatches;
                         }
-                        ++numMismatches;
+                    }
+                    if (numMismatches == 0) {
+                        throw runtime_error("checksum mismatch on node " + std::to_string(blockNode) +
+                                            " for " + sequence->getFullName() + " at " +
+                                            std::to_string(segStart) + ", but its bases agree");
                     }
                 }
             }
