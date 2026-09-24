@@ -33,7 +33,7 @@ ifdef DISABLE_JEMALLOC
 endif
 
 CFLAGS += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath}
-CXXFLAGS += -std=c++14 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
+CXXFLAGS += -std=c++20 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
 basicLibs = ${halPath}/libHal.a ${sonLibPath}/stPinchesAndCacti.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
 ifeq (${jemalloc},on)
 	basicLibs += ${jemallocPath}/lib/libjemalloc.a
@@ -46,7 +46,7 @@ basicLibsDependencies := ${basicLibs}
 # hal's hdf5Filters.cpp implements custom HDF5 lz4/zstd codecs, so libHal.a now
 # carries LZ4_/ZSTD_ references.  h5c++'s wrapper config doesn't pull these in,
 # so every binary linking libHal.a needs them spelled out.
-basicLibs += -llz4 -lzstd
+basicLibs += -llz4 -lzstd -ljansson
 
 # hdf5 compilation is done through its wrappers.
 # we can speficy our own (sonlib) compilers with these variables:
