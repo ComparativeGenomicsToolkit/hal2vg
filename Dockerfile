@@ -15,7 +15,7 @@ ADD . /hal2vg
 WORKDIR /hal2vg
 
 # build
-RUN make clean ; make
+RUN make clean ; make -j $(nproc)
 
 # add hal2vg to the PATH
 ENV PATH /hal2vg:/hal2vg/deps/hal/bin:$PATH

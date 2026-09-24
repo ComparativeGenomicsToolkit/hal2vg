@@ -32,15 +32,17 @@ git submodule update --init --recursive
 # todo: update / figure out / remove hack:
 cp ./build-tools/CMakeLists.txt ./deps/libbdsg-easy/deps/libhandlegraph/CMakeLists.txt
 
+jobs=$(nproc)
+
 if [ $(man gcc | grep nehalem | wc -l) -ge 1 ]
 then
 	 # attempt to increase portability by using older architecture
 	 # this make/sed/make thing is a hack to get around a linking error that just cropped up
-	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make static || true
+	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make -j ${jobs} static || true
 	 sed -i deps/libbdsg-easy/deps/libbdsg/Makefile -e "s/-lomp//g"	 
 	 CFLAGS="-march=nehalem" CXXFLAGS="-march=nehalem" make check-static
 else
-	 make static || true
+	 make -j ${jobs} static || true
 	 sed -i deps/libbdsg-easy/deps/libbdsg/Makefile -e "s/-lomp//g"
 	 make check-static
 fi
