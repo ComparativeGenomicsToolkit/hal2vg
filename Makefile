@@ -53,6 +53,11 @@ ${sonLibPath}/stPinchesAndCacti.a : ${sonLibPath}/sonLib.a ${pinchSources}
 ${libbdsgPath}/lib/libbdsg.a :
 	cd deps/libbdsg-easy && make
 
+# These archives come out of the builds above as byproducts.  Without saying so, make -j
+# on a fresh clone finds no rule for them and stops before the build that makes them runs.
+${sonLibPath}/cuTest.a : ${sonLibPath}/sonLib.a ;
+${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a : ${libbdsgPath}/lib/libbdsg.a ;
+
 # jemalloc is vendored (rather than taken from the system) so that the static release
 # binaries are self contained and always get the same allocator: its size classes are
 # what make the pinch graph cheap, so a different version could quietly change how much
@@ -107,7 +112,7 @@ count-vg-hap-cov : count-vg-hap-cov.o ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -fopenmp -pthread count-vg-hap-cov.o  ${basicLibs}  -o count-vg-hap-cov
 
 test :
-	make
+	${MAKE}
 	${MAKE} test-only
 
 # run the tests against whatever binaries are already sitting in the tree.  the release
