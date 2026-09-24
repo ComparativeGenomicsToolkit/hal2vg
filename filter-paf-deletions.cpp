@@ -14,6 +14,7 @@
 #include <fstream>
 #include <deque>
 #include <unordered_map>
+#include <unordered_set>
 #include <unistd.h>
 #include <getopt.h>
 #include <omp.h>
@@ -72,6 +73,15 @@ void help(char** argv) {
          << "    -i, --ins-threshold F      Like <del-threshold>, but applied to insertions instead of deletions [-1]" << endl
          << "    -m, --max-filter F         If F*<threshold> matches need to be pulled apart to resolve a single deletion, just leave it alone [1]" << endl
          << "    -s, --del-size-threshold F Remove any deletion if the source contig size is < F*<deletion-size> [-1: disabled]" << endl 
+         << "    -M, --max-filter-abs N     A deletion that -m leaves alone is still resolved, by removing up to N matches, when" << endl
+         << "                               fewer than -S query contigs assert it once everything else is filtered.  -m scales the" << endl
+         << "                               budget with the deletion, so the largest false joins are the ones it never fixes; a" << endl
+         << "                               single contig implying a 40Mb deletion is a misplaced paralog, not a deletion, and" << endl
+         << "                               costs a few hundred kb of alignment to undo.  A deletion many contigs make the same way" << endl
+         << "                               (spanning a reference gap, say) keeps -m's protection. [-1: disabled]" << endl
+         << "    -S, --min-support K        With -M: a surviving deletion is 'asserted' by the distinct query contigs whose own" << endl
+         << "                               surviving deletions on the same reference path overlap it reciprocally by at least" << endl
+         << "                               the overlap threshold.  Fewer than K makes it eligible for -M. [2]" << endl
          << "    -r, --ref-prefix STR       Only consider paths whose names start with STR" << endl
          << "    -p, --progress             Print progress" << endl
          << "    -o, --filter-off-ref       Filter mappings that aren't in dominant ref" << endl        
@@ -93,6 +103,9 @@ int main(int argc, char** argv) {
     double max_insertion = -1.0;
     double max_deletion = -1.0;
     double deletion_size_threshold = -1.0;
+    // -M/-S: an absolute budget for deletions that survive -m but that fewer than min_support contigs assert
+    int64_t max_filter_abs = -1;
+    int64_t min_support = 2;
     int c;
     optind = 1; 
     while (true) {
@@ -102,6 +115,8 @@ int main(int argc, char** argv) {
             {"ins-threshold", required_argument, 0, 'i'},
             {"max-filter", required_argument, 0, 'm'},
             {"del-size-threshold", required_argument, 0, 's'},
+            {"max-filter-abs", required_argument, 0, 'M'},
+            {"min-support", required_argument, 0, 'S'},
             {"ref-prefix", required_argument, 0, 'r'},
             {"filter-off-ref", no_argument, 0, 'o'},
             {"help", no_argument, 0, 'h'},            
@@ -113,7 +128,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "d:i:m:s:r:khpvt:",
+        c = getopt_long (argc, argv, "d:i:m:s:M:S:r:khpvt:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -134,6 +149,12 @@ int main(int argc, char** argv) {
         case 's':
             deletion_size_threshold = stof(optarg);
             break;            
+        case 'M':
+            max_filter_abs = stol(optarg);
+            break;
+        case 'S':
+            min_support = stol(optarg);
+            break;
         case 'r':
             ref_prefix = optarg;
             break;
@@ -274,7 +295,23 @@ int main(int argc, char** argv) {
     int64_t off_ref_filtered_match_total = 0;
     int64_t iteration = 0;
 
+    // a deletion -m refused to resolve, kept for the support pass (-M/-S).  Rebuilt every iteration,
+    // as the decisions are.
+    struct Unresolved {
+        path_handle_t ref_path;
+        int64_t ref_lo;
+        int64_t ref_hi;
+        string query_name;
+        int64_t seg_start;
+        int64_t seg_end;
+        int64_t seg_matches;
+    };
+    vector<Unresolved> unresolved;
+    bool support_filtered = false;
+
     do {
+      unresolved.clear();
+      do {
         filtered_line_it = 0;
         for_each_query_block(paf_lines, filtered_lines, [&](int64_t block_start, int64_t block_end) {
                 assert(!filtered_lines[block_start] && !filtered_lines[block_end]);
@@ -349,6 +386,7 @@ int main(int argc, char** argv) {
                 // the deletion is between cut_point[i] and cut_point[i] - 1
                 vector<int64_t> cut_points;
                 vector<int64_t> cut_sizes;
+                vector<int64_t> cut_prevs;
                 for (int64_t i = block_start; i <= block_end; ++i) {
                     if (filtered_lines[i] || off_ref_filtered_lines[i]) {
                         continue;
@@ -378,6 +416,7 @@ int main(int argc, char** argv) {
                         }
                         cut_points.push_back(i);
                         cut_sizes.push_back(paf_delta.delta);
+                        cut_prevs.push_back(prev_idx);
                     } 
                 
                     prev_idx = i;
@@ -489,7 +528,20 @@ int main(int argc, char** argv) {
                                      << "\nfor a total of " << min_segment_matches << " matches, which exceeds deletion threshold of " << max_matches_deleted
                                      << endl << endl;
                             }
-
+                            if (max_filter_abs >= 0 && cut_sizes[j] > 0) {
+                                // remember it for the support pass: the reference span between the two anchors,
+                                // recomputed from the lines that detected it
+                                PafDelta d = get_delta(ref_path, paf_lines[cut_prevs[j]], paf_lines[cut_points[j]], mg_to_vg, ref_index, ref_deletions);
+                                Unresolved u;
+                                u.ref_path = ref_path;
+                                u.ref_lo = min(min(d.prev_ref_start, d.prev_ref_end), min(d.cur_ref_start, d.cur_ref_end));
+                                u.ref_hi = max(max(d.prev_ref_start, d.prev_ref_end), max(d.cur_ref_start, d.cur_ref_end));
+                                u.query_name = paf_lines[cut_points[j]].query_name;
+                                u.seg_start = min_segment_start;
+                                u.seg_end = min_segment_end;
+                                u.seg_matches = min_segment_matches;
+                                unresolved.push_back(u);
+                            }
                         }
                     }
                 }
@@ -506,7 +558,68 @@ int main(int argc, char** argv) {
         if (!keep_off_ref) {
             filtered_line_total += off_ref_filtered_line_it;
         }
-    } while (filtered_line_it > 0);
+      } while (filtered_line_it > 0);
+
+      // support pass.  Everything -m could afford is gone; what is left are the deletions too expensive
+      // to undo relative to their size.  Those asserted by fewer than min_support distinct contigs,
+      // measured as reciprocal overlap on the same reference path among the survivors, are the
+      // misplaced ones -- a lone contig cannot delete 40Mb -- and get the absolute budget instead.
+      // Consensus deletions (every haplotype crossing a reference gap) keep -m's protection.  Only
+      // survivors count as support: a mis-mapping that was cheap enough to filter must not vouch for
+      // the one that was not.
+      support_filtered = false;
+      if (max_filter_abs >= 0 && !unresolved.empty()) {
+          int64_t support_lines = 0;
+          int64_t support_matches = 0;
+          for (const Unresolved& u : unresolved) {
+              if (u.seg_matches > max_filter_abs || filtered_lines[u.seg_start]) {
+                  continue;
+              }
+              unordered_set<string> supporters;
+              int64_t u_len = u.ref_hi - u.ref_lo;
+              for (const Unresolved& v : unresolved) {
+                  if (v.ref_path != u.ref_path) {
+                      continue;
+                  }
+                  int64_t ov = min(u.ref_hi, v.ref_hi) - max(u.ref_lo, v.ref_lo);
+                  int64_t longest = max(u_len, v.ref_hi - v.ref_lo);
+                  if (ov > 0 && longest > 0 && (double)ov / (double)longest >= overlap_threshold) {
+                      supporters.insert(v.query_name);
+                  }
+              }
+              if ((int64_t)supporters.size() >= min_support) {
+                  continue;
+              }
+              int64_t lines_in_segment = 0;
+              for (int64_t k = u.seg_start; k <= u.seg_end; ++k) {
+                  if (!filtered_lines[k]) {
+                      filtered_lines[k] = true;
+                      ++lines_in_segment;
+                      support_matches += paf_lines[k].num_matching;
+                  }
+              }
+              support_lines += lines_in_segment;
+              if (verbose) {
+                  cerr << "[filter-paf-deletions]: filtering " << lines_in_segment << " PAF lines between (inclusively)\n  I="
+                       << u.seg_start << ": " << paf_lines[u.seg_start]
+                       << "\n  J=" << u.seg_end << ":  " << paf_lines[u.seg_end]
+                       << "\nfor a total of " << u.seg_matches << " matches: the deletion of " << u_len << " bp on "
+                       << graph->get_path_name(u.ref_path) << " [" << u.ref_lo << ", " << u.ref_hi << "] is asserted by "
+                       << supporters.size() << " contig(s), fewer than " << min_support << ", so the absolute budget of "
+                       << max_filter_abs << " applies" << endl << endl;
+              }
+          }
+          if (support_lines > 0) {
+              support_filtered = true;
+              filtered_line_total += support_lines;
+              filtered_match_total += support_matches;
+              if (progress) {
+                  cerr << "[filter-paf-deletions]: Support pass: filtered " << support_lines << " lines totaling "
+                       << support_matches << " matches from deletions asserted by fewer than " << min_support << " contigs" << endl;
+              }
+          }
+      }
+    } while (support_filtered);
 
     if (!keep_off_ref) {
         filtered_match_total += off_ref_filtered_match_total;
