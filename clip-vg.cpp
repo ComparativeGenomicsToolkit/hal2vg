@@ -10,6 +10,8 @@
 #include <cassert>
 #include <fstream>
 #include <deque>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <unistd.h>
@@ -877,58 +879,65 @@ pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutabl
         breakpoints.insert(interval.second); // we're cutting before offset, so the open coordinate is what we want
     }
 
-    // to be safe, don't cut and iterate at the same time, so load up steps here
-    vector<handle_t> steps;
+    // don't cut and iterate at the same time, so load up the steps here -- with their lengths.
+    // Dividing a node changes what get_length() says about the handle that kept its id (the first
+    // forward piece), so on a path that visits that node again later -- a cycle, or a segment it
+    // carries both forward and inverted -- every offset after the second visit would drift by the
+    // missing pieces and the remaining cuts would land inside the wrong nodes.  The offsets
+    // therefore come from lengths taken before anything is divided, the cut points are gathered
+    // per node in the node's forward coordinates, and each node is divided exactly once however
+    // many times and in whichever orientations the path visits it.
+    vector<pair<handle_t, int64_t>> steps;
     graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
-            steps.push_back(graph->get_handle_of_step(step_handle));
+            handle_t handle = graph->get_handle_of_step(step_handle);
+            steps.push_back(make_pair(handle, (int64_t)graph->get_length(handle)));
         });
-    
-    // cut the nodes to ensure breakpoints at node boundaries
+
+    // the cut points, node id -> forward-strand offsets
+    map<nid_t, set<size_t>> node_cut_points;
     int64_t offset = 0;
-    for (auto handle : steps) {
-        int64_t len = graph->get_length(handle);
-        // find breakpoints in node
-        vector<size_t> cut_points;
+    for (const auto& step : steps) {
+        const handle_t& handle = step.first;
+        int64_t len = step.second;
         for (auto i = breakpoints.lower_bound(offset); i != breakpoints.end() && *i - offset < len; ++i) {
             int64_t cut_point = *i - offset;
-            // libbdsg is buggy and can't accept cutpoints on ends on reverse strand
+            // a cut on a node boundary is no cut (and libbdsg can't accept one on the ends of a
+            // reverse handle)
             if (cut_point > 0 && cut_point < len) {
-                cut_points.push_back(cut_point);
+                node_cut_points[graph->get_id(handle)].insert(graph->get_is_reverse(handle) ? len - cut_point : cut_point);
             }
-        }
-        // chop the node
-        if (!cut_points.empty()) {
-#ifdef debug
-            cerr << "dividing node_id=" << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << " seq=" << graph->get_sequence(handle)
-                 << " for path " << graph->get_path_name(path_handle) << " at cut points:";
-            for (auto cp : cut_points) {
-                cerr << " " << cp;
-            }
-            cerr << endl;
-#endif        
-            size_t total_pieces_length = 0;
-            vector<handle_t> pieces = graph->divide_handle(handle, cut_points) ;
-            for (size_t i = 0; i < pieces.size(); ++i) {
-                handle_t& piece = pieces[i];
-                size_t piece_length = graph->get_length(piece);
-                if (i == 0) {
-                    assert(piece_length == cut_points[0]);
-                } else if (i < pieces.size() - 1) {
-                    assert(piece_length == cut_points[i] - cut_points[i-1]);
-                }
-                total_pieces_length += piece_length;
-#ifdef debug
-                cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece)
-                     << " tlen=" << total_pieces_length << "/" << len << endl;
-#endif
-            }
-            // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
-            assert(total_pieces_length == (size_t)len);
         }
         offset += len;
     }
-    
-    steps.clear();
+
+    // divide the nodes
+    for (const auto& node_cuts : node_cut_points) {
+        handle_t handle = graph->get_handle(node_cuts.first, false);
+        vector<size_t> cut_points(node_cuts.second.begin(), node_cuts.second.end());
+        size_t len = graph->get_length(handle);
+#ifdef debug
+        cerr << "dividing node_id=" << graph->get_id(handle) << " seq=" << graph->get_sequence(handle)
+             << " for path " << graph->get_path_name(path_handle) << " at cut points:";
+        for (auto cp : cut_points) {
+            cerr << " " << cp;
+        }
+        cerr << endl;
+#endif
+        size_t total_pieces_length = 0;
+        vector<handle_t> pieces = graph->divide_handle(handle, cut_points);
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            size_t piece_length = graph->get_length(pieces[i]);
+            if (i == 0) {
+                assert(piece_length == cut_points[0]);
+            } else if (i < pieces.size() - 1) {
+                assert(piece_length == cut_points[i] - cut_points[i-1]);
+            }
+            total_pieces_length += piece_length;
+        }
+        // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
+        assert(total_pieces_length == len);
+    }
+
     int64_t original_path_length = offset;
     unordered_set<handle_t> chopped_handles;
     offset = 0;
@@ -957,7 +966,12 @@ pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutabl
 #ifdef debug
         cerr << "start offset=" << start_offset << " path length=" << path_length << " end offset=" << end_offset << endl;
 #endif
-        assert(start_offset + path_length == end_offset);
+        if (start_offset + path_length != end_offset) {
+            cerr << "[clip-vg] error: a clip interval boundary at " << end_offset << " of path "
+                 << graph->get_path_name(path_handle) << " does not fall on a node boundary after chopping"
+                 << " (reached " << start_offset + path_length << " from " << start_offset << ")" << endl;
+            exit(1);
+        }
 
         if (path_length > 0) {
             path_handle_t subpath_handle = graph->create_path_handle(make_subpath_name(graph->get_path_name(path_handle), start_offset, path_length));
