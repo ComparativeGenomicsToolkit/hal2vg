@@ -25,11 +25,11 @@ cleanFast :
 
 clean :
 	rm -f hal2vg hal2vg.o clip-vg clip-vg.o halRemoveDupes halRemoveDupes.o halMergeChroms halMergeChroms.o halUnclip halUnclip.o filter-paf-deletions filter-paf-deletions.o
-	cd deps/sonLib && make clean
-	cd deps/pinchesAndCacti && make clean
-	cd deps/hal && make clean
-	cd deps/libbdsg-easy && make clean
-	if [ -e deps/jemalloc/Makefile ] ; then cd deps/jemalloc && make clean ; fi
+	cd deps/sonLib && ${MAKE} clean
+	cd deps/pinchesAndCacti && ${MAKE} clean
+	cd deps/hal && ${MAKE} clean
+	cd deps/libbdsg-easy && ${MAKE} clean
+	if [ -e deps/jemalloc/Makefile ] ; then cd deps/jemalloc && ${MAKE} clean ; fi
 
 hal2vg.o : hal2vg.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . hal2vg.cpp -c
@@ -37,21 +37,24 @@ hal2vg.o : hal2vg.cpp ${basicLibsDependencies}
 # These recurse into submodules whose own makefiles know how to rebuild themselves, but
 # make still has to be told when to bother recursing.  Without the source lists below,
 # editing a submodule and running make here silently relinks the stale archive.
+# They recurse through ${MAKE}, not a bare make: only then does make hand the sub-make its
+# jobserver, and a -j given here reaches hal's hundred-odd compilation units.  With a bare
+# make each submodule was built with -j1 ("jobserver unavailable") whatever the caller asked.
 sonLibSources = $(wildcard deps/sonLib/C/impl/*.c deps/sonLib/C/inc/*.h)
 pinchSources = $(wildcard deps/pinchesAndCacti/impl/*.c deps/pinchesAndCacti/inc/*.h)
 halSources = $(shell find deps/hal -name '*.cpp' -o -name '*.h' 2>/dev/null)
 
 ${sonLibPath}/sonLib.a : ${sonLibSources}
-	cd deps/sonLib && make
+	cd deps/sonLib && ${MAKE}
 
 ${halPath}/libHal.a : ${sonLibPath}/sonLib.a ${halSources}
-	cd deps/hal && make
+	cd deps/hal && ${MAKE}
 
 ${sonLibPath}/stPinchesAndCacti.a : ${sonLibPath}/sonLib.a ${pinchSources}
-	cd deps/pinchesAndCacti && make
+	cd deps/pinchesAndCacti && ${MAKE}
 
 ${libbdsgPath}/lib/libbdsg.a :
-	cd deps/libbdsg-easy && make
+	cd deps/libbdsg-easy && ${MAKE}
 
 # These archives come out of the builds above as byproducts.  Without saying so, make -j
 # on a fresh clone finds no rule for them and stops before the build that makes them runs.
