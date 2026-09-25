@@ -295,8 +295,9 @@ int main(int argc, char** argv) {
     int64_t off_ref_filtered_match_total = 0;
     int64_t iteration = 0;
 
-    // a deletion -m refused to resolve, kept for the support pass (-M/-S).  Rebuilt every iteration,
-    // as the decisions are.
+    // a deletion -m refused to resolve, kept for the support pass (-M/-S).  Rebuilt every inner
+    // iteration, as the decisions are: the last inner iteration filters nothing, so what it leaves
+    // here is exactly the set that survived -m, with nothing an earlier iteration had since resolved.
     struct Unresolved {
         path_handle_t ref_path;
         int64_t ref_lo;
@@ -310,8 +311,8 @@ int main(int argc, char** argv) {
     bool support_filtered = false;
 
     do {
-      unresolved.clear();
       do {
+        unresolved.clear();
         filtered_line_it = 0;
         for_each_query_block(paf_lines, filtered_lines, [&](int64_t block_start, int64_t block_end) {
                 assert(!filtered_lines[block_start] && !filtered_lines[block_end]);

@@ -10,6 +10,8 @@
 #include <cassert>
 #include <fstream>
 #include <deque>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <unistd.h>
@@ -36,9 +38,9 @@ void help(char** argv) {
        << "    -I, --inversion N         Sever one-sided inversions.  A run of at least N bp of reference nodes" << endl
        << "                              that a non-reference path walks backwards is an inversion allele; when" << endl
        << "                              clipping (-u/-k/-b) has removed its junction with the forward reference" << endl
-       << "                              at one end only, clip the other junction too (the alt sequence bridging" << endl
-       << "                              it, or one base if it is a bare edge), so the run becomes its own subpath" << endl
-       << "                              as it would be had both junctions gone.  Requires -e.  0 disables [0]" << endl
+       << "                              at one end only, split the path at the other junction as well, so the" << endl
+       << "                              run becomes its own subpath and the surviving junction edge loses its" << endl
+       << "                              coverage.  Nothing is clipped and no node is divided.  Needs -e." << endl
        << "    -k, --flank N             Extend each clipped interval outward by up to N bp for as long as" << endl
        << "                              unaligned sequence stays dense (see -T), using the same test for" << endl
        << "                              unaligned that -u does.  Removes the fringe left where an aligner" << endl
@@ -119,7 +121,8 @@ static void extend_flanks(const PathHandleGraph* graph,
 static unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph);
 static void sever_one_sided_inversions(const PathHandleGraph* graph,
                                        unordered_map<string, vector<pair<int64_t, int64_t>>>& intervals,
-                                       const string& ref_prefix, int64_t min_len, bool progress);
+                                       const string& ref_prefix, const string& ignore_prefix,
+                                       int64_t min_len, bool progress);
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> get_clipped_intervals(
     const unordered_map<string, vector<pair<int64_t, int64_t>>>& input_intervals,
@@ -500,7 +503,9 @@ int main(int argc, char** argv) {
     // one-sided run's other end is a path terminus rather than a clip interval, and there may be
     // no intervals at all until this adds one.
     if (inversion_min > 0) {
-        sever_one_sided_inversions(graph.get(), bed_intervals, ref_prefix, inversion_min, progress);
+        // paths -d will drop (unless -L keeps them) neither get severed nor count as coverage
+        sever_one_sided_inversions(graph.get(), bed_intervals, ref_prefix,
+                                   leave_aligned_drop_paths ? "" : drop_prefix, inversion_min, progress);
     }
 
     if (progress) {
@@ -727,7 +732,9 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             auto chopped_handles_subpaths = chop_path(graph, path_handle, it->second);
             auto& chopped_handles = chopped_handles_subpaths.first;
             subpaths.insert(subpaths.end(), chopped_handles_subpaths.second.begin(), chopped_handles_subpaths.second.end());
-            if (!chopped_handles.empty()) {
+            // an empty interval (as -I makes) splits the path without chopping anything: the
+            // subpaths still replace the original, or the sequence would be covered twice
+            if (!chopped_handles.empty() || !chopped_handles_subpaths.second.empty()) {
 #ifdef debug
                 cerr << "adding path to destroy list" << graph->get_path_name(path_handle) << endl;
 #endif
@@ -877,58 +884,65 @@ pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutabl
         breakpoints.insert(interval.second); // we're cutting before offset, so the open coordinate is what we want
     }
 
-    // to be safe, don't cut and iterate at the same time, so load up steps here
-    vector<handle_t> steps;
+    // don't cut and iterate at the same time, so load up the steps here -- with their lengths.
+    // Dividing a node changes what get_length() says about the handle that kept its id (the first
+    // forward piece), so on a path that visits that node again later -- a cycle, or a segment it
+    // carries both forward and inverted -- every offset after the second visit would drift by the
+    // missing pieces and the remaining cuts would land inside the wrong nodes.  The offsets
+    // therefore come from lengths taken before anything is divided, the cut points are gathered
+    // per node in the node's forward coordinates, and each node is divided exactly once however
+    // many times and in whichever orientations the path visits it.
+    vector<pair<handle_t, int64_t>> steps;
     graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
-            steps.push_back(graph->get_handle_of_step(step_handle));
+            handle_t handle = graph->get_handle_of_step(step_handle);
+            steps.push_back(make_pair(handle, (int64_t)graph->get_length(handle)));
         });
-    
-    // cut the nodes to ensure breakpoints at node boundaries
+
+    // the cut points, node id -> forward-strand offsets
+    map<nid_t, set<size_t>> node_cut_points;
     int64_t offset = 0;
-    for (auto handle : steps) {
-        int64_t len = graph->get_length(handle);
-        // find breakpoints in node
-        vector<size_t> cut_points;
+    for (const auto& step : steps) {
+        const handle_t& handle = step.first;
+        int64_t len = step.second;
         for (auto i = breakpoints.lower_bound(offset); i != breakpoints.end() && *i - offset < len; ++i) {
             int64_t cut_point = *i - offset;
-            // libbdsg is buggy and can't accept cutpoints on ends on reverse strand
+            // a cut on a node boundary is no cut (and libbdsg can't accept one on the ends of a
+            // reverse handle)
             if (cut_point > 0 && cut_point < len) {
-                cut_points.push_back(cut_point);
+                node_cut_points[graph->get_id(handle)].insert(graph->get_is_reverse(handle) ? len - cut_point : cut_point);
             }
-        }
-        // chop the node
-        if (!cut_points.empty()) {
-#ifdef debug
-            cerr << "dividing node_id=" << graph->get_id(handle) << ":" << graph->get_is_reverse(handle) << " seq=" << graph->get_sequence(handle)
-                 << " for path " << graph->get_path_name(path_handle) << " at cut points:";
-            for (auto cp : cut_points) {
-                cerr << " " << cp;
-            }
-            cerr << endl;
-#endif        
-            size_t total_pieces_length = 0;
-            vector<handle_t> pieces = graph->divide_handle(handle, cut_points) ;
-            for (size_t i = 0; i < pieces.size(); ++i) {
-                handle_t& piece = pieces[i];
-                size_t piece_length = graph->get_length(piece);
-                if (i == 0) {
-                    assert(piece_length == cut_points[0]);
-                } else if (i < pieces.size() - 1) {
-                    assert(piece_length == cut_points[i] - cut_points[i-1]);
-                }
-                total_pieces_length += piece_length;
-#ifdef debug
-                cerr << " piece " << graph->get_id(piece) << ":" << graph->get_is_reverse(piece) << " " << graph->get_sequence(piece)
-                     << " tlen=" << total_pieces_length << "/" << len << endl;
-#endif
-            }
-            // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
-            assert(total_pieces_length == (size_t)len);
         }
         offset += len;
     }
-    
-    steps.clear();
+
+    // divide the nodes
+    for (const auto& node_cuts : node_cut_points) {
+        handle_t handle = graph->get_handle(node_cuts.first, false);
+        vector<size_t> cut_points(node_cuts.second.begin(), node_cuts.second.end());
+        size_t len = graph->get_length(handle);
+#ifdef debug
+        cerr << "dividing node_id=" << graph->get_id(handle) << " seq=" << graph->get_sequence(handle)
+             << " for path " << graph->get_path_name(path_handle) << " at cut points:";
+        for (auto cp : cut_points) {
+            cerr << " " << cp;
+        }
+        cerr << endl;
+#endif
+        size_t total_pieces_length = 0;
+        vector<handle_t> pieces = graph->divide_handle(handle, cut_points);
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            size_t piece_length = graph->get_length(pieces[i]);
+            if (i == 0) {
+                assert(piece_length == cut_points[0]);
+            } else if (i < pieces.size() - 1) {
+                assert(piece_length == cut_points[i] - cut_points[i-1]);
+            }
+            total_pieces_length += piece_length;
+        }
+        // bugs in divide-handle turning out to be a real issue.  add this sanity check to catch them early.
+        assert(total_pieces_length == len);
+    }
+
     int64_t original_path_length = offset;
     unordered_set<handle_t> chopped_handles;
     offset = 0;
@@ -957,7 +971,12 @@ pair<unordered_set<handle_t>, vector<path_handle_t>> chop_path(MutablePathMutabl
 #ifdef debug
         cerr << "start offset=" << start_offset << " path length=" << path_length << " end offset=" << end_offset << endl;
 #endif
-        assert(start_offset + path_length == end_offset);
+        if (start_offset + path_length != end_offset) {
+            cerr << "[clip-vg] error: a clip interval boundary at " << end_offset << " of path "
+                 << graph->get_path_name(path_handle) << " does not fall on a node boundary after chopping"
+                 << " (reached " << start_offset + path_length << " from " << start_offset << ")" << endl;
+            exit(1);
+        }
 
         if (path_length > 0) {
             path_handle_t subpath_handle = graph->create_path_handle(make_subpath_name(graph->get_path_name(path_handle), start_offset, path_length));
@@ -1696,56 +1715,76 @@ void extend_flanks(const PathHandleGraph* graph,
 // absent if the path ends there.  Only runs with exactly one intact junction are touched.
 void sever_one_sided_inversions(const PathHandleGraph* graph,
                                 unordered_map<string, vector<pair<int64_t, int64_t>>>& intervals,
-                                const string& ref_prefix, int64_t min_len, bool progress) {
-    // which way the reference walks each of its nodes.  A node it walks both ways (a duplication
-    // that came back as a cycle) says nothing about orientation and is treated as non-reference.
-    unordered_map<nid_t, bool> ref_reverse;
+                                const string& ref_prefix, const string& ignore_prefix,
+                                int64_t min_len, bool progress) {
+    // which way the reference walks each of its nodes, and where.  A node it walks both ways (a
+    // duplication that came back as a cycle) says nothing about orientation and is treated as
+    // non-reference; a node it walks twice has no one position and its position is never used.
+    // The position is what lets a junction be measured: an inversion's junction edge jumps
+    // across the reference by the length of the inverted segment.
+    struct RefStep { int64_t offset; int32_t path; bool reverse; bool multi; };
+    unordered_map<nid_t, RefStep> ref_steps;
     unordered_set<nid_t> ambiguous;
+    int32_t ref_path_count = 0;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (path_name.compare(0, ref_prefix.length(), ref_prefix) != 0) {
                 return;
             }
+            int32_t path_idx = ref_path_count++;
+            int64_t ref_offset = 0;
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     handle_t handle = graph->get_handle_of_step(step_handle);
                     nid_t node_id = graph->get_id(handle);
                     bool is_reverse = graph->get_is_reverse(handle);
-                    auto it = ref_reverse.find(node_id);
-                    if (it == ref_reverse.end()) {
-                        ref_reverse[node_id] = is_reverse;
-                    } else if (it->second != is_reverse) {
-                        ambiguous.insert(node_id);
+                    auto it = ref_steps.find(node_id);
+                    if (it == ref_steps.end()) {
+                        ref_steps[node_id] = RefStep{ref_offset, path_idx, is_reverse, false};
+                    } else {
+                        it->second.multi = true;
+                        if (it->second.reverse != is_reverse) {
+                            ambiguous.insert(node_id);
+                        }
                     }
+                    ref_offset += graph->get_length(handle);
                 });
         });
+    auto ignored = [&](const string& path_name) {
+        return !ignore_prefix.empty() && path_name.compare(0, ignore_prefix.length(), ignore_prefix) == 0;
+    };
+    // a one-sided run: where its path would be split, and the junction edge that split drains
+    struct Candidate {
+        string path_name;
+        int64_t at;
+        edge_t edge;
+    };
+    vector<Candidate> candidates;
     size_t runs_found = 0;
-    size_t runs_severed = 0;
-    int64_t bases_clipped = 0;
-    // new intervals are collected per path and merged in at the end, so that the lookup below
-    // sees only what clipping decided
-    unordered_map<string, vector<pair<int64_t, int64_t>>> added;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
-            if (path_name.compare(0, ref_prefix.length(), ref_prefix) == 0) {
+            if (path_name.compare(0, ref_prefix.length(), ref_prefix) == 0 || ignored(path_name)) {
                 return;
             }
-            // flatten the path: offset and length of each step, and its orientation relative to the
-            // reference: +1 forward, -1 reverse, 0 for a node the reference does not walk
+            // flatten the path: offset and length of each step, its node, and its orientation
+            // relative to the reference: +1 forward, -1 reverse, 0 for a node the reference does
+            // not walk
             vector<int64_t> offsets;
             vector<int64_t> lengths;
             vector<int8_t> rel;
+            vector<handle_t> handles;
             int64_t offset = 0;
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     handle_t handle = graph->get_handle_of_step(step_handle);
                     nid_t node_id = graph->get_id(handle);
                     int8_t r = 0;
-                    auto it = ref_reverse.find(node_id);
-                    if (it != ref_reverse.end() && !ambiguous.count(node_id)) {
-                        r = graph->get_is_reverse(handle) != it->second ? -1 : 1;
+                    auto it = ref_steps.find(node_id);
+                    if (it != ref_steps.end() && !ambiguous.count(node_id)) {
+                        r = graph->get_is_reverse(handle) != it->second.reverse ? -1 : 1;
                     }
                     offsets.push_back(offset);
                     lengths.push_back((int64_t)graph->get_length(handle));
                     rel.push_back(r);
+                    handles.push_back(handle);
                     offset += lengths.back();
                 });
             const vector<pair<int64_t, int64_t>>* clips = nullptr;
@@ -1767,6 +1806,22 @@ void sever_one_sided_inversions(const PathHandleGraph* graph,
                     }
                 }
                 return false;
+            };
+            // the reference position of step k, if it has exactly one
+            auto ref_of = [&](size_t k, int64_t& off, int32_t& pid) {
+                nid_t node_id = graph->get_id(handles[k]);
+                auto it = ref_steps.find(node_id);
+                if (it == ref_steps.end() || it->second.multi || ambiguous.count(node_id)) {
+                    return false;
+                }
+                off = it->second.offset;
+                pid = it->second.path;
+                return true;
+            };
+            // does a junction's reference jump match the length of the stretch it would invert?
+            // loosely: a stretch carries insertions and deletions against the reference
+            auto jump_fits = [](int64_t jump, int64_t len) {
+                return jump <= 2 * len && len <= 2 * jump;
             };
             size_t n = rel.size();
             size_t i = 0;
@@ -1801,34 +1856,108 @@ void sever_one_sided_inversions(const PathHandleGraph* graph,
                         !junction_cut(offsets[left_fwd] + lengths[left_fwd], offsets[run_start]);
                     bool right_intact = right_fwd >= 0 &&
                         !junction_cut(offsets[run_end] + lengths[run_end], offsets[right_fwd]);
-                    if (left_intact != right_intact) {
-                        int64_t a;
-                        int64_t b;
-                        if (left_intact) {
-                            a = offsets[left_fwd] + lengths[left_fwd];
-                            b = offsets[run_start];
-                            if (b <= a) {
-                                // bare edge: take the run's first base
-                                a = offsets[run_start];
-                                b = a + 1;
+                    // Seen from a contig the assembler emitted on the reverse strand, a real
+                    // two-sided inversion is a FORWARD stretch between two reverse runs, and the
+                    // runs -- which end at the contig's termini or at clips -- look one-sided.
+                    // Telling the two apart is a matter of reference geometry: an inversion's
+                    // junction edge jumps across the reference by the length of the inverted
+                    // segment.  So the forward stretch across this run's intact junction is an
+                    // inversion in its own right, to be left alone, when the junction jumps by
+                    // about its length and some reverse step further on closes it with a matching
+                    // jump, with no clip in between.  Anything else -- a jump the size of the run,
+                    // a stretch that reaches the path's end or a clip first, a palindrome that
+                    // matches neither -- is treated as a one-sided run.
+                    auto flank_is_inversion = [&](int step) {
+                        size_t x = step > 0 ? run_end : run_start;
+                        int64_t y = step > 0 ? right_fwd : left_fwd;
+                        int64_t xo, yo;
+                        int32_t xp, yp;
+                        if (!ref_of(x, xo, xp) || !ref_of(y, yo, yp) || xp != yp) {
+                            return false;
+                        }
+                        int64_t jump1 = llabs(xo - yo);
+                        int64_t far_fwd = y;
+                        for (int64_t k = y + step; k >= 0 && k < (int64_t)n; k += step) {
+                            if (rel[k] == 1) {
+                                far_fwd = k;
+                                continue;
                             }
-                        } else {
-                            a = offsets[run_end] + lengths[run_end];
-                            b = offsets[right_fwd];
-                            if (b <= a) {
-                                // bare edge: take the run's last base
-                                b = a;
-                                a = b - 1;
+                            if (rel[k] != -1) {
+                                continue;
+                            }
+                            int64_t flen = step > 0 ? offsets[far_fwd] + lengths[far_fwd] - offsets[y]
+                                                    : offsets[y] + lengths[y] - offsets[far_fwd];
+                            if (flen > 2 * jump1) {
+                                return false;
+                            }
+                            int64_t zo, wo;
+                            int32_t zp, wp;
+                            if (ref_of(far_fwd, zo, zp) && ref_of(k, wo, wp) && zp == xp && wp == xp &&
+                                jump_fits(jump1, flen) && jump_fits(llabs(zo - wo), flen)) {
+                                return step > 0 ? !junction_cut(offsets[far_fwd] + lengths[far_fwd], offsets[k])
+                                                : !junction_cut(offsets[k] + lengths[k], offsets[far_fwd]);
                             }
                         }
-                        added[path_name].push_back(make_pair(a, b));
-                        bases_clipped += b - a;
-                        ++runs_severed;
+                        return false;
+                    };
+                    if (left_intact != right_intact && !flank_is_inversion(left_intact ? -1 : 1)) {
+                        // the path would be split at the run's boundary on its intact side, with an
+                        // empty interval: nothing clipped, no node divided, the run its own subpath
+                        // and the junction edge without this path's coverage.  Whether it is split
+                        // is decided against the graph below.
+                        int64_t at = left_intact ? offsets[run_start] : offsets[run_end] + lengths[run_end];
+                        edge_t edge = left_intact ? graph->edge_handle(handles[run_start - 1], handles[run_start])
+                                                  : graph->edge_handle(handles[run_end], handles[run_end + 1]);
+                        candidates.push_back({path_name, at, edge});
                     }
                 }
                 i = j;
             }
         });
+    // A junction edge that another path still walks -- a two-sided carrier of the same inversion,
+    // typically -- outlives any severing: the snarl decomposition has both ends of that inversion
+    // from the other path, and splitting this one would only fragment its haplotype.  Only an edge
+    // whose every traversal belongs to a one-sided run is drained, and then every such run is
+    // severed, so that a junction all its carriers lost the other side of does go.  Traversals by
+    // paths that will be dropped are not coverage.
+    unordered_map<edge_t, size_t> candidate_count;
+    for (const Candidate& c : candidates) {
+        ++candidate_count[c.edge];
+    }
+    unordered_map<edge_t, size_t> traversal_count;
+    for (const auto& ec : candidate_count) {
+        const edge_t& edge = ec.first;
+        size_t count = 0;
+        // every traversal of the edge, in either direction, has exactly one step on its first node
+        for (step_handle_t step : graph->steps_of_handle(graph->forward(edge.first))) {
+            if (ignored(graph->get_path_name(graph->get_path_handle_of_step(step)))) {
+                continue;
+            }
+            handle_t here = graph->get_handle_of_step(step);
+            if (graph->has_next_step(step) &&
+                graph->edge_handle(here, graph->get_handle_of_step(graph->get_next_step(step))) == edge) {
+                ++count;
+            }
+            if (graph->has_previous_step(step) &&
+                graph->edge_handle(graph->get_handle_of_step(graph->get_previous_step(step)), here) == edge) {
+                ++count;
+            }
+        }
+        traversal_count[edge] = count;
+    }
+    size_t runs_severed = 0;
+    size_t runs_kept = 0;
+    // new intervals are collected per path and merged in at the end, so that the lookup above
+    // saw only what clipping decided
+    unordered_map<string, vector<pair<int64_t, int64_t>>> added;
+    for (const Candidate& c : candidates) {
+        if (traversal_count[c.edge] > candidate_count[c.edge]) {
+            ++runs_kept;
+            continue;
+        }
+        added[c.path_name].push_back(make_pair(c.at, c.at));
+        ++runs_severed;
+    }
     for (auto& ai : added) {
         vector<pair<int64_t, int64_t>>& ivs = intervals[ai.first];
         ivs.insert(ivs.end(), ai.second.begin(), ai.second.end());
@@ -1849,7 +1978,11 @@ void sever_one_sided_inversions(const PathHandleGraph* graph,
     // stderr to record how much -I did, and a run of -I that says nothing looks like one that
     // did nothing
     cerr << "[clip-vg]: Severed " << runs_severed << " of " << runs_found << " reverse-strand runs >= " << min_len
-         << " bp that clipping had left with one junction, clipping " << bases_clipped << " more bases" << endl;
+         << " bp that clipping had left with one junction";
+    if (runs_kept > 0) {
+        cerr << " (" << runs_kept << " left alone: another path walks the junction edge)";
+    }
+    cerr << endl;
 }
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph) {
