@@ -5,7 +5,7 @@ BASH_TAP_ROOT=./bash-tap
 
 PATH=..:$PATH
 
-plan tests 13
+plan tests 17
 
 # A 2kb reference of 20 100bp nodes.  HGX walks r1-r3 forward, a 50bp junction, r15 down to r5
 # backwards (a 1.1kb inversion), 1.5kb of sequence nothing else aligns to, then r16-r20 forward:
@@ -39,7 +39,7 @@ is "$(fragments noI.vg HGX)" "0-1450:15:11 2950-3450:5:0 " "without -I the one-s
 is "$(fragments noI.vg HGY)" "0-2000:21:11 " "without -I the two-sided inversion is one path"
 
 clip-vg inversion.vg -e GRCh38 -u 1000 -I 500 > withI.vg 2> /dev/null
-is "$(fragments withI.vg HGX)" "0-300:3:0 350-1450:11:11 2950-3450:5:0 " "-I severs the surviving junction: the inverted run is its own subpath"
+is "$(fragments withI.vg HGX)" "0-350:4:0 350-1450:11:11 2950-3450:5:0 " "-I severs the surviving junction: the inverted run is its own subpath and nothing is clipped"
 is "$(fragments withI.vg HGY)" "0-2000:21:11 " "-I leaves a two-sided inversion alone"
 is "$(fragments withI.vg HGZ)" "0-2000:20:0 " "-I leaves a forward path alone"
 is "$(vg validate withI.vg 2>&1)" "graph: valid" "the graph is still valid"
@@ -50,15 +50,11 @@ is "$(fragments big.vg HGX)" "0-1450:15:11 2950-3450:5:0 " "-I above the run's s
 clip-vg inversion.vg -u 1000 -I 500 > /dev/null 2> noref.err
 isnt "$(grep -c 'requires -e' noref.err)" 0 "-I without -e is refused"
 
-# A haplotype that comes back to a node the severing cut had divided.  HGR walks r1, 2kb nothing
-# else aligns to, r3-r2 backwards (a 200bp inversion whose left junction that 2kb clips away, so
-# -I severs the right one at r2's last reverse base, cutting node r2 in two), then r4, r2 forward
-# again (an inverted copy of a segment it also carries the right way round), r5, another 2kb of
-# unaligned sequence and a second such inversion, r7-r6, whose severing cut also lands mid-node.
-# The chopper used to take each step's length as it went: after r2 was divided at the first visit,
-# the second visit counted only the piece that kept r2's id, every later cut was 99 bases early,
-# the r6 cut missed its node and clip-vg died on an assertion.  -f as cactus runs it: the junction
-# bases stay on the reference, only HGR's steps over them go.
+# A haplotype that carries a segment both forward and inverted.  HGR walks r1, 2kb nothing else
+# aligns to, r3-r2 backwards (a 200bp inversion whose left junction that 2kb clips away), r4, r2
+# forward again, r5, another such 2kb and a second such inversion, r7-r6, then r8-r9.  -I splits
+# the path at each run's surviving junction and clips nothing, so no node is divided and the
+# reference keeps its nine steps.  -f as cactus runs it.
 {
     printf 'H\tVN:Z:1.0\n'
     for i in $(seq 1 9); do node r$i 100; done
@@ -72,10 +68,23 @@ isnt "$(grep -c 'requires -e' noref.err)" 0 "-I without -e is refused"
 vg convert -g revisit.gfa -p > revisit.vg
 
 clip-vg revisit.vg -f -e GRCh38 -u 1000 -I 150 > revisit.out.vg 2> revisit.err
-is "$?" 0 "clipping survives a path that revisits a node a severing cut divided"
+is "$?" 0 "-I on a path that carries a segment both ways"
 is "$(grep -c 'Severed 2 of 2' revisit.err)" 1 "both one-sided inversions were severed"
-is "$(fragments revisit.out.vg HGR)" "0-100:1:0 2100-2299:2:2 2300-2600:4:0 4600-4799:2:2 4800-5000:2:0 " "each cut landed in its own node: the inverted runs stand alone and the revisit is intact"
-is "$(fragments revisit.out.vg GRCh38)" "0-900:11:0 " "the reference keeps the junction bases, as two extra steps"
+is "$(fragments revisit.out.vg HGR)" "0-100:1:0 2100-2300:2:2 2300-2600:3:0 4600-4800:2:2 4800-5000:2:0 " "each run is split off at its junction with nothing clipped"
+is "$(fragments revisit.out.vg GRCh38)" "0-900:9:0 " "no node was divided: the reference keeps its nine steps"
 is "$(vg validate revisit.out.vg 2>&1)" "graph: valid" "the graph is still valid"
 
-rm -f inversion.gfa inversion.vg noI.vg withI.vg big.vg noref.err revisit.gfa revisit.vg revisit.out.vg revisit.err
+# The chopper on that same path, given mid-node cuts through -b: one base at the end of each
+# inverted run (the junction bases the first version of -I clipped) plus the two 2kb stretches
+# (vg names the P line path HGR#1#ctg#0).
+# The first cut divides r2 during its reverse visit; the chopper used to take each step's length
+# as it went, so the later forward visit of r2 counted only the piece that kept r2's id, every
+# later offset was 99 bases short, the r6 cut missed its node and clip-vg died on an assertion.
+printf 'HGR#1#ctg#0\t100\t2100\nHGR#1#ctg#0\t2299\t2300\nHGR#1#ctg#0\t2600\t4600\nHGR#1#ctg#0\t4799\t4800\n' > revisit.bed
+clip-vg revisit.vg -f -e GRCh38 -b revisit.bed > revisit.bed.vg 2> /dev/null
+is "$?" 0 "mid-node cuts on a path that revisits a divided node"
+is "$(fragments revisit.bed.vg HGR)" "0-100:1:0 2100-2299:2:2 2300-2600:4:0 4600-4799:2:2 4800-5000:2:0 " "each cut landed in its own node and the revisit is intact"
+is "$(fragments revisit.bed.vg GRCh38)" "0-900:11:0 " "the reference keeps the cut bases, as two extra steps"
+is "$(vg validate revisit.bed.vg 2>&1)" "graph: valid" "the graph is still valid"
+
+rm -f inversion.gfa inversion.vg noI.vg withI.vg big.vg noref.err revisit.gfa revisit.vg revisit.out.vg revisit.err revisit.bed revisit.bed.vg

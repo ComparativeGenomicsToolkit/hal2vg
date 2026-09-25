@@ -38,9 +38,9 @@ void help(char** argv) {
        << "    -I, --inversion N         Sever one-sided inversions.  A run of at least N bp of reference nodes" << endl
        << "                              that a non-reference path walks backwards is an inversion allele; when" << endl
        << "                              clipping (-u/-k/-b) has removed its junction with the forward reference" << endl
-       << "                              at one end only, clip the other junction too (the alt sequence bridging" << endl
-       << "                              it, or one base if it is a bare edge), so the run becomes its own subpath" << endl
-       << "                              as it would be had both junctions gone.  Requires -e.  0 disables [0]" << endl
+       << "                              at one end only, split the path at the other junction as well, so the" << endl
+       << "                              run becomes its own subpath and the surviving junction edge loses its" << endl
+       << "                              coverage.  Nothing is clipped and no node is divided.  Needs -e." << endl
        << "    -k, --flank N             Extend each clipped interval outward by up to N bp for as long as" << endl
        << "                              unaligned sequence stays dense (see -T), using the same test for" << endl
        << "                              unaligned that -u does.  Removes the fringe left where an aligner" << endl
@@ -729,7 +729,9 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
             auto chopped_handles_subpaths = chop_path(graph, path_handle, it->second);
             auto& chopped_handles = chopped_handles_subpaths.first;
             subpaths.insert(subpaths.end(), chopped_handles_subpaths.second.begin(), chopped_handles_subpaths.second.end());
-            if (!chopped_handles.empty()) {
+            // an empty interval (as -I makes) splits the path without chopping anything: the
+            // subpaths still replace the original, or the sequence would be covered twice
+            if (!chopped_handles.empty() || !chopped_handles_subpaths.second.empty()) {
 #ifdef debug
                 cerr << "adding path to destroy list" << graph->get_path_name(path_handle) << endl;
 #endif
@@ -1734,7 +1736,6 @@ void sever_one_sided_inversions(const PathHandleGraph* graph,
         });
     size_t runs_found = 0;
     size_t runs_severed = 0;
-    int64_t bases_clipped = 0;
     // new intervals are collected per path and merged in at the end, so that the lookup below
     // sees only what clipping decided
     unordered_map<string, vector<pair<int64_t, int64_t>>> added;
@@ -1816,27 +1817,16 @@ void sever_one_sided_inversions(const PathHandleGraph* graph,
                     bool right_intact = right_fwd >= 0 &&
                         !junction_cut(offsets[run_end] + lengths[run_end], offsets[right_fwd]);
                     if (left_intact != right_intact) {
-                        int64_t a;
-                        int64_t b;
-                        if (left_intact) {
-                            a = offsets[left_fwd] + lengths[left_fwd];
-                            b = offsets[run_start];
-                            if (b <= a) {
-                                // bare edge: take the run's first base
-                                a = offsets[run_start];
-                                b = a + 1;
-                            }
-                        } else {
-                            a = offsets[run_end] + lengths[run_end];
-                            b = offsets[right_fwd];
-                            if (b <= a) {
-                                // bare edge: take the run's last base
-                                b = a;
-                                a = b - 1;
-                            }
-                        }
-                        added[path_name].push_back(make_pair(a, b));
-                        bases_clipped += b - a;
+                        // split the path at the run's boundary on its intact side.  The interval is
+                        // empty: nothing is clipped, the path simply ends before (or starts after)
+                        // the run, so the junction edge loses this path's coverage and any junction
+                        // sequence is left as a dangling tip -- cactus's join follows clip-vg with
+                        // vg clip -d 1 and -sS, which remove exactly those.  An empty interval
+                        // sits on a step boundary, so no node is divided and every node id
+                        // survives, which the join's full, clip and filter graphs are required to
+                        // share.
+                        int64_t at = left_intact ? offsets[run_start] : offsets[run_end] + lengths[run_end];
+                        added[path_name].push_back(make_pair(at, at));
                         ++runs_severed;
                     }
                 }
@@ -1863,7 +1853,7 @@ void sever_one_sided_inversions(const PathHandleGraph* graph,
     // stderr to record how much -I did, and a run of -I that says nothing looks like one that
     // did nothing
     cerr << "[clip-vg]: Severed " << runs_severed << " of " << runs_found << " reverse-strand runs >= " << min_len
-         << " bp that clipping had left with one junction, clipping " << bases_clipped << " more bases" << endl;
+         << " bp that clipping had left with one junction" << endl;
 }
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph) {
