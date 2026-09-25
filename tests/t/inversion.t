@@ -5,7 +5,7 @@ BASH_TAP_ROOT=./bash-tap
 
 PATH=..:$PATH
 
-plan tests 17
+plan tests 33
 
 # A 2kb reference of 20 100bp nodes.  HGX walks r1-r3 forward, a 50bp junction, r15 down to r5
 # backwards (a 1.1kb inversion), 1.5kb of sequence nothing else aligns to, then r16-r20 forward:
@@ -87,4 +87,72 @@ is "$(fragments revisit.bed.vg HGR)" "0-100:1:0 2100-2299:2:2 2300-2600:4:0 4600
 is "$(fragments revisit.bed.vg GRCh38)" "0-900:11:0 " "the reference keeps the cut bases, as two extra steps"
 is "$(vg validate revisit.bed.vg 2>&1)" "graph: valid" "the graph is still valid"
 
-rm -f inversion.gfa inversion.vg noI.vg withI.vg big.vg noref.err revisit.gfa revisit.vg revisit.out.vg revisit.err revisit.bed revisit.bed.vg
+# Severing is decided against the graph, not the path alone.  HGS carries HGX's inversion with both
+# junctions (through a1 and a3), so HGX's surviving junction edge a1->r15- is walked by a two-sided
+# path: severing HGX would change no topology, only fragment it, and -I leaves it alone.  HGX2 is a
+# second one-sided carrier (its own unaligned tail v1-v3 gets clipped): when every path walking the
+# junction edge is one-sided there, all of them are severed and the edge goes.
+{
+    grep -v '^P' inversion.gfa
+    printf 'P\tGRCh38#0#chrT\t%s\t*\n' "${fwd%,}"
+    printf 'P\tHGX#1#ctg\tr1+,r2+,r3+,a1+,%su1+,u2+,u3+,r16+,r17+,r18+,r19+,r20+\t*\n' "$rev"
+    printf 'P\tHGY#1#ctg\tr1+,r2+,r3+,a2+,%sa3+,r16+,r17+,r18+,r19+,r20+\t*\n' "$rev"
+    printf 'P\tHGS#1#ctg\tr1+,r2+,r3+,a1+,%sa3+,r16+,r17+,r18+,r19+,r20+\t*\n' "$rev"
+} > shared.gfa
+vg convert -g shared.gfa -p > shared.vg
+clip-vg shared.vg -e GRCh38 -u 1000 -I 500 > shared.out.vg 2> shared.err
+is "$(grep -c 'Severed 0 of 3 .*(1 left alone: another path walks the junction edge)' shared.err)" 1 "a junction edge a two-sided path walks is left alone (three runs found: HGX, HGY and HGS)"
+is "$(fragments shared.out.vg HGX)" "0-1450:15:11 2950-3450:5:0 " "...and the one-sided path is not fragmented for nothing"
+is "$(fragments shared.out.vg HGS)" "0-2000:21:11 " "...while the two-sided path is untouched"
+{
+    grep -v '^P' inversion.gfa
+    node v1 500; node v2 500; node v3 500
+    printf 'L\tr5\t-\tv1\t+\t0M\nL\tv1\t+\tv2\t+\t0M\nL\tv2\t+\tv3\t+\t0M\nL\tv3\t+\tr16\t+\t0M\n'
+    printf 'P\tGRCh38#0#chrT\t%s\t*\n' "${fwd%,}"
+    printf 'P\tHGX#1#ctg\tr1+,r2+,r3+,a1+,%su1+,u2+,u3+,r16+,r17+,r18+,r19+,r20+\t*\n' "$rev"
+    printf 'P\tHGX2#1#ctg\tr1+,r2+,r3+,a1+,%sv1+,v2+,v3+,r16+,r17+,r18+,r19+,r20+\t*\n' "$rev"
+} > twice.gfa
+vg convert -g twice.gfa -p > twice.vg
+clip-vg twice.vg -e GRCh38 -u 1000 -I 500 > twice.out.vg 2> twice.err
+is "$(grep -c 'Severed 2 of 2 reverse-strand runs >= 500 bp that clipping had left with one junction$' twice.err)" 1 "two one-sided carriers of the same junction edge are both severed"
+is "$(fragments twice.out.vg HGX)" "0-350:4:0 350-1450:11:11 2950-3450:5:0 " "...the first"
+is "$(fragments twice.out.vg HGX2)" "0-350:4:0 350-1450:11:11 2950-3450:5:0 " "...and the second"
+
+# A 2kb reference of 20 100bp nodes.  HGV is a contig the assembler emitted on the reverse strand:
+# it walks r20 down to r11 backwards, then r9,r10 forward (a 200bp inversion, both junctions intact),
+# then r8 down to r1 backwards.  Its reverse flanks are not inversions: -I must not sever them.
+# HGW is the same reverse contig whose last 600bp are forward and run to the contig end (a one-sided
+# inversion from the contig's point of view): its forward run has one intact junction and is severed.
+# HGN is a forward contig with a one-step reverse blip in its flank (r3) and a 600bp inversion at its
+# end: the blip is noise, not a run, and must not make the flank look like a bounded island.
+{
+    printf 'H\tVN:Z:1.0\n'
+    for i in $(seq 1 20); do node r$i 100; done
+    for i in $(seq 1 19); do printf 'L\tr%d\t+\tr%d\t+\t0M\n' $i $((i+1)); done
+    printf 'L\tr11\t-\tr9\t+\t0M\nL\tr10\t+\tr8\t-\t0M\nL\tr11\t-\tr5\t+\t0M\n'
+    printf 'L\tr2\t+\tr3\t-\t0M\nL\tr3\t-\tr4\t+\t0M\nL\tr10\t+\tr20\t-\t0M\n'
+    top=$(for i in $(seq 20 -1 11); do printf 'r%d-,' $i; done)
+    bot=$(for i in $(seq 8 -1 1); do printf 'r%d-,' $i; done)
+    printf 'P\tGRCh38#0#chrT\t%s\t*\n' "${fwd%,}"
+    printf 'P\tHGV#1#ctg\t%sr9+,r10+,%s\t*\n' "$top" "${bot%,}"
+    printf 'P\tHGW#1#ctg\t%sr5+,r6+,r7+,r8+,r9+,r10+\t*\n' "$top"
+    printf 'P\tHGN#1#ctg\tr1+,r2+,r3-,r4+,r5+,r6+,r7+,r8+,r9+,r10+,r20-,r19-,r18-,r17-,r16-,r15-\t*\n'
+} > revcontig.gfa
+vg convert -g revcontig.gfa -p > revcontig.vg
+
+clip-vg revcontig.vg -f -e GRCh38 -u 1000 -I 150 > revcontig.out.vg 2> revcontig.err
+is "$?" 0 "-I on a reverse-strand contig"
+is "$(grep -c 'Severed 2 of 4' revcontig.err)" 1 "of the four reverse runs, the two whose forward neighbour reaches a contig end are severed"
+is "$(fragments revcontig.out.vg HGV)" "0-2000:20:18 " "a reverse contig with a 200bp forward island stays in one piece"
+is "$(fragments revcontig.out.vg HGW)" "0-1000:10:10 1000-1600:6:0 " "a reverse contig whose forward run reaches its end is split at the run's intact junction"
+is "$(fragments revcontig.out.vg HGN)" "0-1000:10:1 1000-1600:6:6 " "a one-step reverse blip in the flank does not stop a one-sided inversion from being severed"
+is "$(fragments revcontig.out.vg GRCh38)" "0-2000:20:0 " "no node was divided"
+is "$(vg validate revcontig.out.vg 2>&1)" "graph: valid" "the graph is still valid"
+
+clip-vg revcontig.vg -f -e GRCh38 -u 1000 -I 250 > big.vg 2> big.err
+is "$(grep -c 'Severed 2 of 4' big.err)" 1 "-I above the island's size changes nothing: the flanks are the runs and the island is what guards them"
+is "$(fragments big.vg HGN)" "0-1000:10:1 1000-1600:6:6 " "and the one-sided inversion is still severed"
+is "$(fragments big.vg HGV)" "0-2000:20:18 " "and leaves the contig alone"
+
+rm -f inversion.gfa inversion.vg noI.vg withI.vg big.vg big.err noref.err revisit.gfa revisit.vg revisit.out.vg revisit.err revisit.bed revisit.bed.vg
+rm -f shared.gfa shared.vg shared.out.vg shared.err twice.gfa twice.vg twice.out.vg twice.err revcontig.gfa revcontig.vg revcontig.out.vg revcontig.err
