@@ -1845,10 +1845,11 @@ void sever_one_sided_inversions(const PathHandleGraph* graph,
         }
         ivs.swap(merged);
     }
-    if (progress) {
-        cerr << "[clip-vg]: Severed " << runs_severed << " of " << runs_found << " reverse-strand runs >= " << min_len
-             << " bp that clipping had left with one junction, clipping " << bases_clipped << " more bases" << endl;
-    }
+    // reported regardless of -p, like the flank calibration: cactus's join reads this line off
+    // stderr to record how much -I did, and a run of -I that says nothing looks like one that
+    // did nothing
+    cerr << "[clip-vg]: Severed " << runs_severed << " of " << runs_found << " reverse-strand runs >= " << min_len
+         << " bp that clipping had left with one junction, clipping " << bases_clipped << " more bases" << endl;
 }
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph) {
