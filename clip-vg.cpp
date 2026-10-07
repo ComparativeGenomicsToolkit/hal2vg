@@ -18,6 +18,7 @@
 #include <getopt.h>
 #include <limits>
 #include <cmath>
+#include <algorithm>
 
 #include "bdsg/packed_graph.hpp"
 #include "bdsg/hash_graph.hpp"
@@ -52,6 +53,12 @@ void help(char** argv) {
        << "                              which is strongly advisable: how much unaligned sequence a" << endl
        << "                              pangenome carries varies several-fold between graphs and is" << endl
        << "                              not predictable from any input property [-1]" << endl
+       << "    -N, --neutral-bed FILE    Bases whose alignment status carries no information, such as the" << endl
+       << "                              ones paffy unanchor freed for realignment: they count as neither" << endl
+       << "                              aligned nor unaligned in -u, in the -T calibration and in -k.  BED" << endl
+       << "                              names are SAMPLE#HAP#CONTIG in contig coordinates, and apply to" << endl
+       << "                              every path of that sample, haplotype and contig (any sense, phase" << endl
+       << "                              block or subrange, offset by the subrange start)" << endl
        << "    -e, --ref-prefix STR      Forwardize (but don't clip) paths whose name begins with STR" << endl
        << "    -F, --forwardize-nonref   Also forwardize any node that no path visits forward.  Needs -e." << endl
        << "                              This mints new node ids, so it must not be used on a graph whose" << endl
@@ -68,9 +75,18 @@ void help(char** argv) {
 }    
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> load_bed(istream& bed_stream, const string& ref_prefix);
+// neutral intervals (sorted, disjoint, in path coordinates) keyed by path name: see -N
+typedef unordered_map<string, vector<pair<int64_t, int64_t>>> NeutralMap;
+static unordered_map<string, vector<pair<int64_t, int64_t>>> load_neutral_bed(istream& bed_stream, const string& bed_path,
+                                                                              size_t& num_intervals, int64_t& num_bp);
+static NeutralMap map_neutral_to_paths(const PathHandleGraph* graph,
+                                       const unordered_map<string, vector<pair<int64_t, int64_t>>>& neutral_bed,
+                                       size_t& num_paths, size_t& num_matched_paths, size_t& num_unmatched_names);
+static int64_t neutral_overlap(const vector<pair<int64_t, int64_t>>* neutral, int64_t from, int64_t to);
 static unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
                                                                             const string& ref_prefix, const string& anchor_prefix,
-                                                                            const unordered_set<nid_t>& anchor_nodes);
+                                                                            const unordered_set<nid_t>& anchor_nodes,
+                                                                            const NeutralMap& neutral);
 static void build_anchor_nodes(const PathHandleGraph* graph, const string& anchor_prefix,
                                unordered_set<nid_t>& anchor_nodes_out);
 static unique_ptr<MutablePathMutableHandleGraph> load_graph(istream& graph_stream);
@@ -116,7 +132,7 @@ static void extend_flanks(const PathHandleGraph* graph,
                           unordered_map<string, vector<pair<int64_t, int64_t>>>& intervals,
                           int64_t max_flank, double threshold,
                           const unordered_set<nid_t>& anchor_nodes, bool have_anchor_prefix,
-                          bool progress);
+                          const NeutralMap& neutral, bool progress);
 
 static unordered_map<string, vector<pair<int64_t, int64_t>>> get_path_intervals(const PathHandleGraph* graph);
 static void sever_one_sided_inversions(const PathHandleGraph* graph,
@@ -161,6 +177,7 @@ static inline string make_subpath_name(const string& path_name, size_t offset, s
 int main(int argc, char** argv) {
 
     string bed_path;
+    string neutral_bed_path;
     // shared by find_unaligned and extend_flanks so both agree on what unaligned means
     unordered_set<nid_t> anchor_nodes;
     int64_t min_length = 0;
@@ -188,6 +205,7 @@ int main(int argc, char** argv) {
         static const struct option long_options[] = {
             {"help", no_argument, 0, 'h'},
             {"bed", required_argument, 0, 'b'},
+            {"neutral-bed", required_argument, 0, 'N'},
             {"min-length", required_argument, 0, 'm'},
             {"max-unaligned", required_argument, 0, 'u'},
             {"anchor", required_argument, 0, 'a'},
@@ -211,7 +229,7 @@ int main(int argc, char** argv) {
 
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hpb:m:u:a:k:T:I:e:Fcfnr:d:Lo:",
+        c = getopt_long (argc, argv, "hpb:N:m:u:a:k:T:I:e:Fcfnr:d:Lo:",
                          long_options, &option_index);
 
         // Detect the end of the options.
@@ -223,6 +241,9 @@ int main(int argc, char** argv) {
         case 'b':
             bed_path = optarg;
             ++input_count;
+            break;
+        case 'N':
+            neutral_bed_path = optarg;
             break;
         case 'm':
             min_length = stol(optarg);
@@ -386,6 +407,28 @@ int main(int argc, char** argv) {
              << " gate on unaligned density, or a negative one to calibrate." << endl;
     }
 
+    // -N only changes what -u, the -T calibration and -k count, so say so when none of them runs
+    // rather than let a wrapper believe it took effect.  -m clips whole paths by length, which no
+    // count of aligned bases enters.
+    unordered_map<string, vector<pair<int64_t, int64_t>>> neutral_bed;
+    size_t neutral_bed_intervals = 0;
+    int64_t neutral_bed_bp = 0;
+    if (!neutral_bed_path.empty()) {
+        if (min_length != 0) {
+            cerr << "[clip-vg] warning: -N/--neutral-bed is ignored with -m/--min-length" << endl;
+        } else if (max_unaligned <= 0 && flank <= 0) {
+            cerr << "[clip-vg] warning: -N/--neutral-bed has no effect without -u/--max-unaligned"
+                 << " or -k/--flank" << endl;
+        }
+        // read it before the graph, so a malformed file fails in seconds rather than after the load
+        ifstream neutral_stream(neutral_bed_path);
+        if (!neutral_stream) {
+            cerr << "[clip-vg] error: Unable to open neutral BED file " << neutral_bed_path << endl;
+            return 1;
+        }
+        neutral_bed = load_neutral_bed(neutral_stream, neutral_bed_path, neutral_bed_intervals, neutral_bed_bp);
+    }
+
     string graph_path = argv[optind++];
     ifstream graph_stream(graph_path);
     if (!graph_stream) {
@@ -420,6 +463,20 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+
+    // Neutral intervals per path, in path coordinates.  Empty without -N, which leaves every count
+    // below exactly as it was.  With -m nothing reads them, so do not map them either.
+    NeutralMap neutral;
+    if (!neutral_bed_path.empty() && min_length == 0) {
+        size_t num_paths = 0, num_matched = 0, num_unmatched_names = 0;
+        neutral = map_neutral_to_paths(graph.get(), neutral_bed, num_paths, num_matched, num_unmatched_names);
+        // unconditional, like the calibration line: it changes what gets clipped, and a run
+        // without -p still needs to show whether its BED found the paths it was meant for
+        cerr << "[clip-vg]: Neutral BED: " << neutral_bed_intervals << " intervals, " << neutral_bed_bp
+             << " bp on " << num_matched << " of " << num_paths << " paths; " << num_unmatched_names
+             << " BED names match no path" << endl;
+    }
+    neutral_bed.clear();
 
     unordered_map<string, vector<pair<int64_t, int64_t>>> input_graph_intervals;
     if (!out_bed_path.empty()) {
@@ -460,12 +517,12 @@ int main(int argc, char** argv) {
                  << " using anchor prefix " << anchor_prefix << " and ref prefix " << ref_prefix << endl;
         }
         bed_intervals = find_unaligned(graph.get(), max_unaligned, ref_prefix, anchor_prefix,
-                                       anchor_nodes);
+                                       anchor_nodes, neutral);
     }
     
     if (flank > 0 && !bed_intervals.empty()) {
         extend_flanks(graph.get(), bed_intervals, flank, flank_threshold, anchor_nodes,
-                      !anchor_prefix.empty(), progress);
+                      !anchor_prefix.empty(), neutral, progress);
 
         // Mott's rule walks past a locally aligned stretch when unaligned sequence resumes beyond
         // it, so two intervals with a short gap between them can each extend across it and end up
@@ -622,38 +679,204 @@ void build_anchor_nodes(const PathHandleGraph* graph, const string& anchor_prefi
 
 unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
                                                                      const string& ref_prefix, const string& anchor_prefix,
-                                                                     const unordered_set<nid_t>& anchor_nodes) {
+                                                                     const unordered_set<nid_t>& anchor_nodes,
+                                                                     const NeutralMap& neutral) {
     unordered_map<string, vector<pair<int64_t, int64_t>>> intervals;
     
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             string path_name = graph->get_path_name(path_handle);
             if (ref_prefix.empty() || path_name.substr(0, ref_prefix.length()) != ref_prefix) {
+                auto ni = neutral.find(path_name);
+                const vector<pair<int64_t, int64_t>>* path_neutral = ni == neutral.end() ? nullptr : &ni->second;
                 int64_t offset = 0;
                 int64_t start = -1;
+                // the run's length, counting only its non-neutral bases (-N).  Without -N it is
+                // offset - start, which is what this test has always used.
+                int64_t counted = 0;
                 graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                         handle_t handle = graph->get_handle_of_step(step_handle);
                         int64_t len = (int64_t)graph->get_length(handle);
                         bool aligned = step_is_aligned(graph, handle, path_handle, anchor_nodes,
                                                        !anchor_prefix.empty());
+                        int64_t neutral_bp = neutral_overlap(path_neutral, offset, offset + len);
+                        // A wholly neutral step ends a run as an aligned one does: these are bases an
+                        // aligner had anchored before paffy unanchor freed them, so the run would have
+                        // been split here without -N, and counting it as unaligned would be what -N
+                        // is there to prevent.
+                        bool breaks = aligned || (neutral_bp > 0 && neutral_bp == len);
                         // start an unaligned interval
-                        if (start < 0 && aligned == false) {
+                        if (start < 0 && breaks == false) {
                             start = offset;
+                            counted = 0;
                         }
                         // end an unaligned interval
-                        if (aligned == true) {
-                            if (start >= 0 && offset - start > max_unaligned) {
+                        if (breaks == true) {
+                            if (start >= 0 && counted > max_unaligned) {
                                 intervals[path_name].push_back(make_pair(start, offset));
                             }
                             start = -1;
+                        } else {
+                            counted += len - neutral_bp;
                         }
                         offset += len;
                     });
-                if (start >= 0 && offset - start > max_unaligned) {
+                if (start >= 0 && counted > max_unaligned) {
                     intervals[path_name].push_back(make_pair(start, offset));
                 }
             }
         });
     return intervals;
+}
+
+// Read -N.  Names are SAMPLE#HAP#CONTIG (exactly three fields, HAP a number), coordinates 0-based
+// half open in the contig.  Anything else is an error rather than a skipped line: a BED whose names
+// match nothing would make -N silently do nothing.  Overlapping and touching intervals are merged.
+unordered_map<string, vector<pair<int64_t, int64_t>>> load_neutral_bed(istream& bed_stream, const string& bed_path,
+                                                                       size_t& num_intervals, int64_t& num_bp) {
+    unordered_map<string, vector<pair<int64_t, int64_t>>> bed;
+    string buffer;
+    size_t line_no = 0;
+    auto all_digits = [](const string& t) {
+        return !t.empty() && t.size() <= 18 && all_of(t.begin(), t.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    while (getline(bed_stream, buffer)) {
+        ++line_no;
+        if (!buffer.empty() && buffer.back() == '\r') {
+            buffer.pop_back();
+        }
+        if (buffer.empty() || buffer[0] == '#') {
+            continue;
+        }
+        vector<string> toks;
+        size_t pos = 0;
+        while (true) {
+            size_t tab = buffer.find('\t', pos);
+            toks.push_back(buffer.substr(pos, tab == string::npos ? string::npos : tab - pos));
+            if (tab == string::npos) {
+                break;
+            }
+            pos = tab + 1;
+        }
+        vector<string> name_toks;
+        if (toks.size() >= 3) {
+            size_t npos = 0;
+            while (true) {
+                size_t hash = toks[0].find('#', npos);
+                name_toks.push_back(toks[0].substr(npos, hash == string::npos ? string::npos : hash - npos));
+                if (hash == string::npos) {
+                    break;
+                }
+                npos = hash + 1;
+            }
+        }
+        if (toks.size() < 3 || name_toks.size() != 3 || name_toks[0].empty() || name_toks[2].empty() ||
+            !all_digits(name_toks[1]) || !all_digits(toks[1]) || !all_digits(toks[2]) ||
+            stoll(toks[1]) > stoll(toks[2])) {
+            cerr << "[clip-vg] error: line " << line_no << " of neutral BED " << bed_path
+                 << " is not NAME<tab>START<tab>END with NAME = SAMPLE#HAP#CONTIG and 0 <= START <= END: "
+                 << buffer << endl;
+            exit(1);
+        }
+        int64_t start = stoll(toks[1]);
+        int64_t end = stoll(toks[2]);
+        if (start == end) {
+            continue;
+        }
+        // the haplotype as a number, so that it compares the way path names parse it
+        string key = name_toks[0] + "#" + to_string(stoull(name_toks[1])) + "#" + name_toks[2];
+        bed[key].push_back(make_pair(start, end));
+    }
+    num_intervals = 0;
+    num_bp = 0;
+    for (auto& bi : bed) {
+        vector<pair<int64_t, int64_t>>& iv = bi.second;
+        sort(iv.begin(), iv.end());
+        vector<pair<int64_t, int64_t>> merged;
+        for (const auto& x : iv) {
+            if (!merged.empty() && x.first <= merged.back().second) {
+                merged.back().second = max(merged.back().second, x.second);
+            } else {
+                merged.push_back(x);
+            }
+        }
+        swap(iv, merged);
+        num_intervals += iv.size();
+        for (const auto& x : iv) {
+            num_bp += x.second - x.first;
+        }
+    }
+    return bed;
+}
+
+// Give each path the neutral intervals of its sample, haplotype and contig, in its own coordinates.
+// Sense and phase block are ignored, so the reference-sense GRCh38#0#chr20 and the haplotype-sense
+// HG00408#1#CM085964.1#0 that hal2vg writes both match, and a subpath [start-end] -- from hal2vg's
+// _sub_ decoding or from an earlier clip -- is offset by its start.
+NeutralMap map_neutral_to_paths(const PathHandleGraph* graph,
+                                const unordered_map<string, vector<pair<int64_t, int64_t>>>& neutral_bed,
+                                size_t& num_paths, size_t& num_matched_paths, size_t& num_unmatched_names) {
+    NeutralMap neutral;
+    unordered_set<string> matched_names;
+    num_paths = 0;
+    num_matched_paths = 0;
+    graph->for_each_path_handle([&](path_handle_t path_handle) {
+            ++num_paths;
+            if (neutral_bed.empty()) {
+                return;
+            }
+            string path_name = graph->get_path_name(path_handle);
+            PathSense sense;
+            string sample;
+            string locus;
+            size_t haplotype;
+            size_t phase_block;
+            subrange_t subrange;
+            PathMetadata::parse_path_name(path_name, sense, sample, locus, haplotype, phase_block, subrange);
+            if (sample == PathMetadata::NO_SAMPLE_NAME || haplotype == PathMetadata::NO_HAPLOTYPE ||
+                locus == PathMetadata::NO_LOCUS_NAME) {
+                return;
+            }
+            string key = sample + "#" + to_string(haplotype) + "#" + locus;
+            auto bi = neutral_bed.find(key);
+            if (bi == neutral_bed.end()) {
+                return;
+            }
+            matched_names.insert(key);
+            int64_t base = subrange != PathMetadata::NO_SUBRANGE ? (int64_t)subrange.first : 0;
+            int64_t path_length = 0;
+            graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
+                    path_length += graph->get_length(graph->get_handle_of_step(step_handle));
+                });
+            vector<pair<int64_t, int64_t>> iv;
+            for (const auto& x : bi->second) {
+                int64_t s = max(x.first - base, (int64_t)0);
+                int64_t e = min(x.second - base, path_length);
+                if (s < e) {
+                    iv.push_back(make_pair(s, e));
+                }
+            }
+            if (!iv.empty()) {
+                ++num_matched_paths;
+                neutral[path_name] = std::move(iv);
+            }
+        });
+    num_unmatched_names = neutral_bed.size() - matched_names.size();
+    return neutral;
+}
+
+// how many bases of [from, to) are neutral, given a path's sorted disjoint neutral intervals
+int64_t neutral_overlap(const vector<pair<int64_t, int64_t>>* neutral, int64_t from, int64_t to) {
+    if (neutral == nullptr || neutral->empty() || to <= from) {
+        return 0;
+    }
+    // the first interval ending after from: the ends are sorted too, the intervals being disjoint
+    auto it = partition_point(neutral->begin(), neutral->end(),
+                              [&](const pair<int64_t, int64_t>& x) { return x.second <= from; });
+    int64_t total = 0;
+    for (; it != neutral->end() && it->first < to; ++it) {
+        total += min(it->second, to) - max(it->first, from);
+    }
+    return total;
 }
 
 
@@ -1450,8 +1673,16 @@ void extend_flanks(const PathHandleGraph* graph,
                    unordered_map<string, vector<pair<int64_t, int64_t>>>& intervals,
                    int64_t max_flank, double threshold,
                    const unordered_set<nid_t>& anchor_nodes, bool have_anchor_prefix,
-                   bool progress) {
+                   const NeutralMap& neutral, bool progress) {
     int64_t total_added = 0;
+
+    // -N: a path's neutral intervals, or null.  Neutral bases are left out of both the calibration
+    // and the walk's scores; every distance (the -k cap, the bounds, the calibration windows) stays
+    // in raw path coordinates.  Without -N every overlap below is 0 and nothing changes.
+    auto path_neutral = [&](const string& path_name) -> const vector<pair<int64_t, int64_t>>* {
+        auto ni = neutral.find(path_name);
+        return ni == neutral.end() ? nullptr : &ni->second;
+    };
     size_t num_extended = 0;
 
     // flatten a path into the length of the node at each step and the offset it starts at
@@ -1511,6 +1742,7 @@ void extend_flanks(const PathHandleGraph* graph,
             if (lengths.empty()) {
                 continue;
             }
+            const vector<pair<int64_t, int64_t>>* calib_neutral = path_neutral(pi.first);
             vector<int64_t> edges;
             for (auto& interval : pi.second) {
                 edges.push_back(interval.first);
@@ -1534,12 +1766,14 @@ void extend_flanks(const PathHandleGraph* graph,
                 if (after < edges.size()) {
                     dist = min(dist, edges[after] - mid);
                 }
+                // only the step's non-neutral bases count, in both the total and the unaligned
+                int64_t counted = lengths[i] - neutral_overlap(calib_neutral, offsets[i], offsets[i] + lengths[i]);
                 if (dist <= CALIB_NEAR) {
-                    near_tot += lengths[i];
-                    if (unaligned[i]) near_unaligned += lengths[i];
+                    near_tot += counted;
+                    if (unaligned[i]) near_unaligned += counted;
                 } else if (dist >= CALIB_FAR) {
-                    far_tot += lengths[i];
-                    if (unaligned[i]) far_unaligned += lengths[i];
+                    far_tot += counted;
+                    if (unaligned[i]) far_unaligned += counted;
                 }
             }
         }
@@ -1603,11 +1837,15 @@ void extend_flanks(const PathHandleGraph* graph,
         if (lengths.empty()) {
             continue;
         }
+        const vector<pair<int64_t, int64_t>>* walk_neutral = path_neutral(pi.first);
 
         // The score of one node, in Mott's formulation.  eff is how much of the node counts: the
-        // part of it that lies outside the interval being extended and outside the neighbouring
-        // intervals.  That is the whole node everywhere except at the two ends of a walk.
-        auto node_score = [&](size_t idx, int64_t eff) -> double {
+        // part of it [from, to) that lies outside the interval being extended and outside the
+        // neighbouring intervals.  That is the whole node everywhere except at the two ends of a
+        // walk.  Its neutral bases (-N) count for nothing either way, so a wholly neutral node
+        // scores 0 and the walk can never stop on its far side.
+        auto node_score = [&](size_t idx, int64_t from, int64_t to) -> double {
+            int64_t eff = (to - from) - neutral_overlap(walk_neutral, from, to);
             return (unaligned[idx] ? (double)eff : 0.0) - threshold * (double)eff;
         };
 
@@ -1651,7 +1889,7 @@ void extend_flanks(const PathHandleGraph* graph,
                 if (to <= from || interval.first - from > max_flank) {
                     break;
                 }
-                running += node_score(i, to - from);
+                running += node_score(i, from, to);
                 if (running > best) {
                     best = running;
                     best_pos = from;
@@ -1677,7 +1915,7 @@ void extend_flanks(const PathHandleGraph* graph,
                 if (to <= from || to - interval.second > max_flank) {
                     break;
                 }
-                running += node_score(i, to - from);
+                running += node_score(i, from, to);
                 if (running > best) {
                     best = running;
                     best_pos = to;

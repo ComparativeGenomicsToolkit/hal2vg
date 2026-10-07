@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 81
+plan tests 96
 
 # how many steps of a given path still point backwards.  Reports instead of counting if the
 # graph is unusable or the path is missing, so that a crashed run leaving an empty output
@@ -501,3 +501,86 @@ is "$?" "0" "-k without an interval source is not fatal"
 is "$(grep -c 'needs clipped intervals' opt-nosrc.err)" "1" "but it does warn"
 
 rm -f opt.gfa opt.vg opt-t1.err opt-nan.err opt-t0.err opt-nosrc.err
+
+# --- -N/--neutral-bed --------------------------------------------------------------------------
+
+# Neutral bases (paffy unanchor freed them) count as neither aligned nor unaligned.  The paths here
+# carry a 1250bp unaligned run [1000-2250) between two aligned stretches; 300bp of it neutral
+# leaves 950 counted, under -u 1000.  Names match on sample, haplotype and contig, whatever the
+# sense, phase block or subrange: a reference-sense SAMP#0#chr1, a haplotype-sense HAPS#1#chr1#0,
+# and SUBS#1#chr1#0[100-3350], whose BED record is in contig coordinates and so 100 to the right.
+# Read without that offset, SUBS's neutral stretch would cover only 200bp of the run and it would
+# be clipped (1050 > 1000).  A generic path never matches, and CTRL has no record: both are clipped.
+mkgraph neu.gfa "5:200:1 25:50:0 5:200:1"
+walk="$(seq 35 | sed 's/^/>/' | paste -sd '')"
+sed -i '1s/.*/H\tVN:Z:1.0\tRS:Z:REF SAMP/' neu.gfa
+{
+    printf 'W\tHAPS\t1\tchr1\t0\t3250\t%s\n' "$walk"
+    printf 'W\tSUBS\t1\tchr1\t100\t3350\t%s\n' "$walk"
+    printf 'W\tCTRL\t1\tchr1\t0\t3250\t%s\n' "$walk"
+    printf 'P\tgeneric\t%s\t*\n' "$(seq 35 | sed 's/$/+/' | paste -sd,)"
+} >> neu.gfa
+vg convert -g neu.gfa -p > neu.vg
+printf '# a comment, then a blank line\n\nSAMP#0#chr1\t1950\t2250\nHAPS#1#chr1\t1950\t2100\nHAPS#1#chr1\t2100\t2250\nSUBS#1#chr1\t2050\t2350\nNOPE#1#chr1\t0\t10\n' > neu.bed
+clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -N neu.bed -o neu-clip.bed > neu-u.vg 2> neu-u.err
+is "$?" "0" "-N runs"
+is "$(cut -f1 neu-clip.bed | sort -u | tr '\n' ' ' | sed 's/ *$//')" "CTRL#1#chr1#0 generic" \
+   "-N spares the runs it neutralises on reference, haplotype and subranged paths, and nothing else"
+is "$(grep -c 'Neutral BED: 4 intervals, 910 bp on 3 of 8 paths; 1 BED names match no path' neu-u.err)" "1" \
+   "-N reports what it matched, after merging touching records"
+clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -o neu-none.bed > /dev/null 2> neu-none.err
+is "$(cut -f1 neu-none.bed | sort -u | wc -l)" "5" "without -N all five runs are clipped"
+is "$(grep -c 'Neutral BED' neu-none.err)" "0" "and nothing is said about a neutral BED"
+
+# a wholly neutral node ends a run as an aligned one would, so two 600bp runs either side of one are
+# not merged into a 1200bp run that -u 1000 would clip.  Without -N it is one 1300bp run.
+mkgraph neu2.gfa "5:200:1 6:100:0 1:100:0 6:100:0 5:200:1"
+vg convert -g neu2.gfa -p > neu2.vg
+printf 'SAMP#0#chr1\t1600\t1700\n' > neu2.bed
+clip-vg neu2.vg -f -e REF -a _MINIGRAPH_ -u 1000 -N neu2.bed 2> /dev/null > neu2-n.vg
+is "$(samp_frags neu2-n.vg)" "SAMP#0#chr1#0" "a wholly neutral node splits an unaligned run, so SAMP is not clipped"
+clip-vg neu2.vg -f -e REF -a _MINIGRAPH_ -u 1000 > neu2-u.vg
+is "$(samp_frags neu2-u.vg)" "0-1000 2300-3300" "which is clipped whole without -N"
+
+# -k: in the flank graph above the left fringe is [400-790).  With [400-600) of it neutral, the walk
+# scores [600-790) as unaligned, then adds 0 across the neutral stretch, then turns negative on the
+# aligned sequence: the boundary stops at 600 and does not move into the neutral bases.  The right
+# fringe has no neutral bases and goes as before.  A fixed -T means no calibration line.
+mkgraph flankn.gfa "2:200:1 39:10:0 1:10:1 5:100:0 1:10:1 39:10:0 2:200:1"
+vg convert -g flankn.gfa -p > flankn.vg
+printf 'SAMP#0#chr1\t400\t600\n' > flankn.bed
+clip-vg flankn.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 0.25 -N flankn.bed > flankn-k.vg 2> flankn-k.err
+is "$(samp_frags flankn-k.vg)" "0-600 1700-2100" "-k adds nothing across neutral bases and stops short of them"
+is "$(grep -c 'Flank calibration' flankn-k.err)" "0" "-N with a fixed -T does not calibrate"
+# an empty BED changes nothing at all: same graph, byte for byte
+: > empty.bed
+clip-vg flankn.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 0.25 > flankn-plain.vg
+clip-vg flankn.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 1000 -T 0.25 -N empty.bed > flankn-empty.vg 2> flankn-empty.err
+cmp -s flankn-plain.vg flankn-empty.vg
+is "$?" "0" "an empty neutral BED leaves the output byte-identical"
+is "$(grep -c 'Neutral BED: 0 intervals, 0 bp on 0 of' flankn-empty.err)" "1" "and says it is empty"
+
+# calibration: the calibration graph above calibrates to 0.039 (780 of 10000 near bases
+# unaligned, nothing far).  Making the 4600bp of aligned 200bp nodes left of the fringe neutral
+# takes them out of near_tot: 780 / 5400 = 0.144444, threshold half that.
+mkgraph calibn.gfa "1500:200:1 39:10:0 1:10:1 5:100:0 1:10:1 39:10:0 1500:200:1"
+vg convert -g calibn.gfa -p > calibn.vg
+printf 'SAMP#0#chr1\t295400\t300000\n' > calibn.bed
+clip-vg calibn.vg -f -e REF -a _MINIGRAPH_ -u 400 -k 5000 -N calibn.bed > /dev/null 2> calibn.err
+is "$(grep -c '0.144444 of bases unaligned.*using threshold 0.0722222' calibn.err)" "1" \
+   "-N takes wholly neutral nodes out of the calibration"
+
+# input checks
+printf 'SAMP#chr1\t0\t10\n' > bad.bed
+clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -N bad.bed > /dev/null 2> bad.err
+is "$?" "1" "a neutral BED name that is not SAMPLE#HAP#CONTIG is an error"
+printf 'SAMP#0#chr1\t20\t10\n' > bad.bed
+clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -N bad.bed > /dev/null 2> bad.err
+is "$?" "1" "so is an inverted interval"
+clip-vg neu.vg -f -e REF -N neu.bed > /dev/null 2> neu-noop.err
+is "$(grep -c 'has no effect without -u' neu-noop.err)" "1" "-N without -u or -k warns that it does nothing"
+
+rm -f neu.gfa neu.vg neu.bed neu-clip.bed neu-u.vg neu-u.err neu-none.bed neu-none.err neu-noop.err
+rm -f neu2.gfa neu2.vg neu2.bed neu2-n.vg neu2-u.vg
+rm -f flankn.gfa flankn.vg flankn.bed flankn-k.vg flankn-k.err empty.bed flankn-plain.vg flankn-empty.vg flankn-empty.err
+rm -f calibn.gfa calibn.vg calibn.bed calibn.err bad.bed bad.err
