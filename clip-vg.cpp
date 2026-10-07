@@ -81,7 +81,8 @@ static unordered_map<string, vector<pair<int64_t, int64_t>>> load_neutral_bed(is
                                                                               size_t& num_intervals, int64_t& num_bp);
 static NeutralMap map_neutral_to_paths(const PathHandleGraph* graph,
                                        const unordered_map<string, vector<pair<int64_t, int64_t>>>& neutral_bed,
-                                       size_t& num_paths, size_t& num_matched_paths, size_t& num_unmatched_names);
+                                       size_t& num_paths, size_t& num_matched_paths, size_t& num_unmatched_names,
+                                       int64_t& unmatched_bp, int64_t& outside_bp, string& example_unmatched);
 static int64_t neutral_overlap(const vector<pair<int64_t, int64_t>>* neutral, int64_t from, int64_t to);
 static unordered_map<string, vector<pair<int64_t, int64_t>>> find_unaligned(const PathHandleGraph* graph, int64_t max_unaligned,
                                                                             const string& ref_prefix, const string& anchor_prefix,
@@ -469,12 +470,31 @@ int main(int argc, char** argv) {
     NeutralMap neutral;
     if (!neutral_bed_path.empty() && min_length == 0) {
         size_t num_paths = 0, num_matched = 0, num_unmatched_names = 0;
-        neutral = map_neutral_to_paths(graph.get(), neutral_bed, num_paths, num_matched, num_unmatched_names);
+        int64_t unmatched_bp = 0, outside_bp = 0;
+        string example_unmatched;
+        neutral = map_neutral_to_paths(graph.get(), neutral_bed, num_paths, num_matched, num_unmatched_names,
+                                       unmatched_bp, outside_bp, example_unmatched);
         // unconditional, like the calibration line: it changes what gets clipped, and a run
         // without -p still needs to show whether its BED found the paths it was meant for
         cerr << "[clip-vg]: Neutral BED: " << neutral_bed_intervals << " intervals, " << neutral_bed_bp
              << " bp on " << num_matched << " of " << num_paths << " paths; " << num_unmatched_names
-             << " BED names match no path" << endl;
+             << " BED names match no path; " << outside_bp << " bp lie outside the paths they name" << endl;
+        // A BED that misses its paths, by name or by coordinates, makes -N quietly do nothing for those
+        // bases, which is the failure it exists to prevent.  Neither happens with a BED made for this
+        // graph, so say so as a warning rather than leave it to a count.
+        if (num_unmatched_names > 0 || outside_bp > 0) {
+            cerr << "[clip-vg] warning: -N/--neutral-bed does not fit this graph: ";
+            if (num_unmatched_names > 0) {
+                cerr << num_unmatched_names << " of its " << neutral_bed.size() << " names (" << unmatched_bp
+                     << " bp, e.g. " << example_unmatched << ") match no path";
+            }
+            if (outside_bp > 0) {
+                cerr << (num_unmatched_names > 0 ? ", and " : "") << outside_bp
+                     << " bp lie outside the paths they name";
+            }
+            cerr << ".  Those bases count as they would without -N.  Names must be SAMPLE#HAP#CONTIG, in"
+                 << " the coordinates of the whole contig" << endl;
+        }
     }
     neutral_bed.clear();
 
@@ -814,9 +834,12 @@ unordered_map<string, vector<pair<int64_t, int64_t>>> load_neutral_bed(istream& 
 // _sub_ decoding or from an earlier clip -- is offset by its start.
 NeutralMap map_neutral_to_paths(const PathHandleGraph* graph,
                                 const unordered_map<string, vector<pair<int64_t, int64_t>>>& neutral_bed,
-                                size_t& num_paths, size_t& num_matched_paths, size_t& num_unmatched_names) {
+                                size_t& num_paths, size_t& num_matched_paths, size_t& num_unmatched_names,
+                                int64_t& unmatched_bp, int64_t& outside_bp, string& example_unmatched) {
     NeutralMap neutral;
-    unordered_set<string> matched_names;
+    // the contig ranges [base, base + length) each matched name's paths cover, to find the BED bases
+    // none of them holds
+    unordered_map<string, vector<pair<int64_t, int64_t>>> covered;
     num_paths = 0;
     num_matched_paths = 0;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
@@ -841,12 +864,12 @@ NeutralMap map_neutral_to_paths(const PathHandleGraph* graph,
             if (bi == neutral_bed.end()) {
                 return;
             }
-            matched_names.insert(key);
             int64_t base = subrange != PathMetadata::NO_SUBRANGE ? (int64_t)subrange.first : 0;
             int64_t path_length = 0;
             graph->for_each_step_in_path(path_handle, [&](step_handle_t step_handle) {
                     path_length += graph->get_length(graph->get_handle_of_step(step_handle));
                 });
+            covered[key].push_back(make_pair(base, base + path_length));
             vector<pair<int64_t, int64_t>> iv;
             for (const auto& x : bi->second) {
                 int64_t s = max(x.first - base, (int64_t)0);
@@ -860,7 +883,43 @@ NeutralMap map_neutral_to_paths(const PathHandleGraph* graph,
                 neutral[path_name] = std::move(iv);
             }
         });
-    num_unmatched_names = neutral_bed.size() - matched_names.size();
+    num_unmatched_names = neutral_bed.size() - covered.size();
+    unmatched_bp = 0;
+    outside_bp = 0;
+    example_unmatched.clear();
+    for (const auto& bi : neutral_bed) {
+        auto ci = covered.find(bi.first);
+        if (ci == covered.end()) {
+            for (const auto& x : bi.second) {
+                unmatched_bp += x.second - x.first;
+            }
+            // the smallest name, so the message does not depend on hash order
+            if (example_unmatched.empty() || bi.first < example_unmatched) {
+                example_unmatched = bi.first;
+            }
+            continue;
+        }
+        // both lists are sorted and disjoint once the ranges are merged (the BED's were on loading)
+        vector<pair<int64_t, int64_t>>& r = ci->second;
+        sort(r.begin(), r.end());
+        vector<pair<int64_t, int64_t>> m;
+        for (const auto& x : r) {
+            if (!m.empty() && x.first <= m.back().second) {
+                m.back().second = max(m.back().second, x.second);
+            } else {
+                m.push_back(x);
+            }
+        }
+        for (const auto& x : bi.second) {
+            int64_t inside = 0;
+            auto it = partition_point(m.begin(), m.end(),
+                                      [&](const pair<int64_t, int64_t>& y) { return y.second <= x.first; });
+            for (; it != m.end() && it->first < x.second; ++it) {
+                inside += min(it->second, x.second) - max(it->first, x.first);
+            }
+            outside_bp += (x.second - x.first) - inside;
+        }
+    }
     return neutral;
 }
 

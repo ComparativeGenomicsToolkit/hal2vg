@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 96
+plan tests 98
 
 # how many steps of a given path still point backwards.  Reports instead of counting if the
 # graph is unusable or the path is missing, so that a crashed run leaving an empty output
@@ -526,8 +526,10 @@ clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -N neu.bed -o neu-clip.bed > neu
 is "$?" "0" "-N runs"
 is "$(cut -f1 neu-clip.bed | sort -u | tr '\n' ' ' | sed 's/ *$//')" "CTRL#1#chr1#0 generic" \
    "-N spares the runs it neutralises on reference, haplotype and subranged paths, and nothing else"
-is "$(grep -c 'Neutral BED: 4 intervals, 910 bp on 3 of 8 paths; 1 BED names match no path' neu-u.err)" "1" \
+is "$(grep -c 'Neutral BED: 4 intervals, 910 bp on 3 of 8 paths; 1 BED names match no path; 0 bp lie outside' neu-u.err)" "1" \
    "-N reports what it matched, after merging touching records"
+is "$(grep -c 'warning: -N/--neutral-bed does not fit this graph: 1 of its 4 names (10 bp, e.g. NOPE#1#chr1) match no path' neu-u.err)" "1" \
+   "and warns about the name that matches nothing"
 clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -o neu-none.bed > /dev/null 2> neu-none.err
 is "$(cut -f1 neu-none.bed | sort -u | wc -l)" "5" "without -N all five runs are clipped"
 is "$(grep -c 'Neutral BED' neu-none.err)" "0" "and nothing is said about a neutral BED"
@@ -579,6 +581,13 @@ clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -N bad.bed > /dev/null 2> bad.er
 is "$?" "1" "so is an inverted interval"
 clip-vg neu.vg -f -e REF -N neu.bed > /dev/null 2> neu-noop.err
 is "$(grep -c 'has no effect without -u' neu-noop.err)" "1" "-N without -u or -k warns that it does nothing"
+# coordinates past the end of the path they name (a BED made for another graph, or not in contig
+# coordinates) are reported and warned about, not silently dropped
+printf 'SAMP#0#chr1\t3200\t3300\n' > off.bed
+clip-vg neu.vg -f -e REF -a _MINIGRAPH_ -u 1000 -N off.bed > /dev/null 2> off.err
+is "$(grep -c '0 BED names match no path; 50 bp lie outside the paths they name' off.err) $(grep -c 'warning: -N/--neutral-bed does not fit this graph: 50 bp lie outside' off.err)" "1 1" \
+   "-N counts and warns about BED bases outside the paths they name"
+rm -f off.bed off.err
 
 rm -f neu.gfa neu.vg neu.bed neu-clip.bed neu-u.vg neu-u.err neu-none.bed neu-none.err neu-noop.err
 rm -f neu2.gfa neu2.vg neu2.bed neu2-n.vg neu2-u.vg
