@@ -1003,15 +1003,28 @@ subrange_t resolve_subpath_naming(string& path_name) {
     }
 }
 
+// a genome name is SAMPLE#HAPLOTYPE (PanSN), or just SAMPLE.  Cactus used to spell the haplotype
+// SAMPLE.HAPLOTYPE instead, and as it now rewrites any such name to SAMPLE#HAPLOTYPE, a name with
+// no # that ends in .HAPLOTYPE can only have come from a HAL made the old way, and is read that way.
+// either way the haplotype has to be all digits: KOLF2.1J is just a sample
 size_t resolve_haplotype_naming(string& genome_name) {
-    size_t haplotype = PathMetadata::NO_HAPLOTYPE;
-    size_t dp = genome_name.rfind(".");
-    if (dp != string::npos) {
-        try {
-            haplotype = stol(genome_name.substr(dp + 1));
-            genome_name = genome_name.substr(0, dp);
-        } catch(...) {
+    auto is_haplotype = [&](size_t sep) {
+        return sep > 0 && sep + 1 < genome_name.length() &&
+            genome_name.find_first_not_of("0123456789", sep + 1) == string::npos;
+    };
+    size_t sep = genome_name.find('#');
+    if (sep != string::npos) {
+        if (!is_haplotype(sep)) {
+            throw runtime_error("[hal2vg] genome name " + genome_name + " has a # but is not SAMPLE#HAPLOTYPE "
+                                "(with HAPLOTYPE an integer), so it cannot be made into PanSN path names");
+        }
+    } else {
+        sep = genome_name.rfind('.');
+        if (sep == string::npos || !is_haplotype(sep)) {
+            return PathMetadata::NO_HAPLOTYPE;
         }
     }
+    size_t haplotype = stoul(genome_name.substr(sep + 1));
+    genome_name = genome_name.substr(0, sep);
     return haplotype;
 }

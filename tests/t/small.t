@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 2
+plan tests 5
 
 maf2hal small/small.maf small.hal
 hal2vg small.hal > small.vg
@@ -20,3 +20,23 @@ is $(jq --argjson a "$(cat small.json)" --argjson b "$(cat small/truth.json)" -n
 rm -f small.vg small.json
 
 rm -f small.hal 
+
+# genome names are PanSN SAMPLE#HAPLOTYPE (or just SAMPLE, for haplotype 0), and a '.' is only a
+# haplotype in the old SAMPLE.HAPLOTYPE spelling of a HAL made before cactus used them
+maf2hal small/small.maf names.hal
+printf 'human\tHG002#1\nchimp\tKOLF2.1J\ncat\tGCA_054883195.1#0\n' > names.tsv
+halRenameGenomes names.hal names.tsv > /dev/null
+hal2vg names.hal > names.vg
+is "$(vg paths -L -v names.vg | sort | tr '\n' ' ')" "GCA_054883195.1#0#3 HG002#1#1 KOLF2.1J#0#2 " "PanSN genome names make PanSN paths"
+
+printf 'HG002#1\tHG002.2\n' > names.tsv
+halRenameGenomes names.hal names.tsv > /dev/null
+hal2vg names.hal > names.vg
+is "$(vg paths -L -v names.vg | sort | tr '\n' ' ')" "GCA_054883195.1#0#3 HG002#2#1 KOLF2.1J#0#2 " "the old SAMPLE.HAPLOTYPE spelling is still read"
+
+printf 'HG002.2\tHG002#x\n' > names.tsv
+halRenameGenomes names.hal names.tsv > /dev/null
+hal2vg names.hal > names.vg 2> /dev/null
+isnt $? 0 "a # that is not SAMPLE#HAPLOTYPE is an error"
+
+rm -f names.hal names.tsv names.vg
