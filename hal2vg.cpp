@@ -1053,6 +1053,10 @@ subrange_t resolve_subpath_naming(string& path_name) {
     }
 }
 
+// a genome name is SAMPLE#HAPLOTYPE (PanSN), or just SAMPLE.  Cactus used to spell the haplotype
+// SAMPLE.HAPLOTYPE instead, and as it now rewrites any such name to SAMPLE#HAPLOTYPE, a name with
+// no # that ends in .HAPLOTYPE can only have come from a HAL made the old way, and is read that way.
+// either way the haplotype has to be all digits: KOLF2.1J is just a sample
 size_t resolve_haplotype_naming(string& genome_name) {
     auto is_haplotype = [&](size_t sep) {
         return sep > 0 && sep + 1 < genome_name.length() &&
