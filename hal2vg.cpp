@@ -459,6 +459,8 @@ int main(int argc, char** argv) {
         }
 
         // start iterating over the genomes again in order to export to handle graph
+        vector<string> threadedNames = threadGenomes;
+        std::sort(threadedNames.begin(), threadedNames.end());
         queue = {rootGenomeName};
         while (!queue.empty()) {
             string genomeName = queue.front();
@@ -467,10 +469,13 @@ int main(int argc, char** argv) {
             // skip it if
             // it's an ancestor and we don't want ancestors or
             // if we have targets and it's not in it or
-            // if it's on the ignore list
+            // if it's on the ignore list or
+            // it has no threads, like an ancestor whose descendants are all ignored, which is
+            // not needed to span the targets: there is nothing in the pinch graph to convert
             bool ignoreGenome = ((noAncestors && !alignment->getChildNames(genomeName).empty()) ||
                                  (givenTargets && !std::binary_search(targetNames.begin(), targetNames.end(), genomeName)) ||
-                                 (std::binary_search(ignoreNames.begin(), ignoreNames.end(), genomeName)));
+                                 (std::binary_search(ignoreNames.begin(), ignoreNames.end(), genomeName)) ||
+                                 !std::binary_search(threadedNames.begin(), threadedNames.end(), genomeName));
             if (!ignoreGenome) {
                 const Genome* genome = alignment->openGenome(genomeName);
 
@@ -651,7 +656,10 @@ void build_id_to_sequence(AlignmentConstPtr alignment,
             const Sequence* sequence = seqIt->getSequence();
             unordered_map<string, int64_t>::const_iterator found = nameToID.find(sequence->getFullName());
             if (found != nameToID.end()) {
-                IDToSequence.at(found->second) = sequence;
+                // not the iterator's pointer: an mmap hal's iterator hands out its own member,
+                // which is gone once the iterator moves on.  the genome's own object lasts as
+                // long as the genome is open, in either format
+                IDToSequence.at(found->second) = genome->getSequence(sequence->getName());
             }
         }
     }
