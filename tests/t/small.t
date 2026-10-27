@@ -21,18 +21,18 @@ rm -f small.vg small.json
 
 rm -f small.hal 
 
-# genome names are PanSN SAMPLE#HAPLOTYPE (or just SAMPLE, for haplotype 0), and a '.' is only a
-# haplotype in the old SAMPLE.HAPLOTYPE spelling of a HAL made before cactus used them
+# genome names are PanSN SAMPLE#HAPLOTYPE (or just SAMPLE, for haplotype 0), and a '.' is never a
+# haplotype: cactus only reads the old SAMPLE.HAPLOTYPE spelling in its input seqfile
 maf2hal small/small.maf names.hal
-printf 'human\tHG002#1\nchimp\tKOLF2.1J\ncat\tGCA_054883195.1#0\n' > names.tsv
+printf 'human\tHG002#1\nchimp\tKOLF2.1J\ncat\tGCA_054883195.1\n' > names.tsv
 halRenameGenomes names.hal names.tsv > /dev/null
 hal2vg names.hal > names.vg
 is "$(vg paths -L -v names.vg | sort | tr '\n' ' ')" "GCA_054883195.1#0#3 HG002#1#1 KOLF2.1J#0#2 " "PanSN genome names make PanSN paths"
 
-printf 'HG002#1\tHG002.2\n' > names.tsv
+printf 'HG002#1\tHG002.2\nGCA_054883195.1\tGCA_054883195.1#0\n' > names.tsv
 halRenameGenomes names.hal names.tsv > /dev/null
 hal2vg names.hal > names.vg
-is "$(vg paths -L -v names.vg | sort | tr '\n' ' ')" "GCA_054883195.1#0#3 HG002#2#1 KOLF2.1J#0#2 " "the old SAMPLE.HAPLOTYPE spelling is still read"
+is "$(vg paths -L -v names.vg | sort | tr '\n' ' ')" "GCA_054883195.1#0#3 HG002.2#0#1 KOLF2.1J#0#2 " "a '.' is part of the sample, and #0 is haplotype 0"
 
 printf 'HG002.2\tHG002#x\n' > names.tsv
 halRenameGenomes names.hal names.tsv > /dev/null
