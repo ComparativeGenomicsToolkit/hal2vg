@@ -160,12 +160,15 @@ def main():
         cases.append(('provided_hal', pathlib.Path(args.hal).resolve(), []))
     for name, hal, flags in cases:
         signatures = []
-        for mode in ['baseline', 'low']:
+        for mode in ['legacy', 'planned']:
             graph = work / f'{name}.{mode}.vg'
             log = work / f'{name}.{mode}.log'
             command = [binary, str(hal), '--inMemory', '--progress', *flags]
-            if mode == 'low':
-                command += ['--lowMemory', '--lowMemoryBuffer', '17']
+            if mode == 'legacy':
+                command += ['--legacyConversion']
+            else:
+                # a tiny DNA window, so that blocks are read in many pieces
+                command += ['--baseBuffer', '17']
             with graph.open('wb') as out, log.open('w') as err:
                 subprocess.run(command, stdout=out, stderr=err, check=True)
             subprocess.run([args.vg, 'validate', str(graph)], check=True)

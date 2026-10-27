@@ -57,29 +57,21 @@ hal2vg input.hal --inMemory --chop 32 --progress > output.pg
 
 **Note**: The output graph is only readable by vg version 1.24.0 and greater.
 
-### Low-memory conversion
+### How blocks that disagree are converted
 
-For large alignments, `--lowMemory` avoids expanding the pinch graph into one
-segment per member and base-group interval. It retains the original blocks and
-builds compact, bit-packed grouping plans, then generates the output graph directly.
-The original conversion remains the default.
+hal2vg pinches each genome to its parent along whole aligned segments, mismatches included, so a
+block of the pinch graph can hold more than one base at a position.  By default, hal2vg works out
+where each such block divides and how, and makes the nodes from that plan as it builds the graph,
+without changing the pinch graph.  DNA is read in windows to do this: `--baseBuffer` sets their
+total size in bytes (default 67108864), and is not a limit on memory use.
 
-```bash
-hal2vg input.hal --inMemory --lowMemory --progress > output.pg
-```
-
-DNA is read in windows during planning. `--lowMemoryBuffer` sets the total DNA
-window budget in bytes (default 67108864); it is not a limit on process memory.
-Plans and the output graph still grow with the alignment. The conversion does not
-write temporary path records or sort paths on disk.
-
-Low-memory output may use different node IDs or additional linear subdivisions.
-Compare path metadata, spelled sequences and oriented base-level homology rather
-than binary files or node counts. `make test-low-memory` checks generated HALs
-containing substitutions, indels, reversals, paralogy, masked bases and path naming
-variants against the original conversion. These tests require `vg` and Python 3.
-For complete PackedGraph outputs, see [tests/graph_equivalence.md](tests/graph_equivalence.md).
+`--legacyConversion` instead splits those blocks in the pinch graph itself, as hal2vg used to,
+which costs a pinch segment for every member of every piece and so far more memory on large
+alignments.  The two make the same graph, apart from node IDs and a few nodes that the default
+leaves in two where `--legacyConversion` makes one (`vg mod -u` removes the difference).  So
+compare path metadata, spelled sequences and base-level homology rather than files or node
+counts.  `make test-low-memory` does that for generated HALs with substitutions, indels,
+reversals, paralogy, masked bases and path naming variants, and needs `vg` and Python 3.  For
+complete PackedGraph outputs, see [tests/graph_equivalence.md](tests/graph_equivalence.md).
 
 Copyright (C) 2020 by UCSC Computational Genomics Lab
-
-

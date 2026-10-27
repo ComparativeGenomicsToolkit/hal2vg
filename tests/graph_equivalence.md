@@ -1,16 +1,16 @@
 # Comparing complete PackedGraph outputs
 
 Compare outputs from the same HAL and the same selection/reference options,
-with `--lowMemory` as the only conversion-mode difference. Use raw hal2vg
+with `--legacyConversion` as the only difference. Use raw hal2vg
 outputs, before clipping, filtering or other graph transformations.
 
 Build the optional verifier using the existing dependencies plus OpenSSL/libcrypto:
 
 ```bash
 make -f Makefile -f verification.mk hal2vg-fingerprint
-./hal2vg-fingerprint original.pg > original.jsonl
-./hal2vg-fingerprint low-memory.pg > low-memory.jsonl
-python3 tests/compare_graph_fingerprints.py original.jsonl low-memory.jsonl
+./hal2vg-fingerprint legacy.pg > legacy.jsonl
+./hal2vg-fingerprint default.pg > default.jsonl
+python3 tests/compare_graph_fingerprints.py legacy.jsonl default.jsonl
 ```
 
 Run the two scans sequentially. Each scan loads one output graph plus node-level

@@ -103,10 +103,13 @@ static void initParser(CLParser* optionsParser) {
     optionsParser->addOptionFlag("progress",
                                  "show progress",
                                  false);
-    optionsParser->addOptionFlag("lowMemory",
-                                 "construct the graph from compact base-group plans without expanding pinch segments",
+    optionsParser->addOptionFlag("legacyConversion",
+                                 "split the pinch graph wherever a block's members disagree, as hal2vg used to. "
+                                 "needs much more memory, and makes the same graph up to node ids and unchopping",
                                  false);
-    optionsParser->addOption("lowMemoryBuffer", "DNA window buffer in bytes for --lowMemory (not a process memory limit)",
+    optionsParser->addOption("baseBuffer",
+                             "bytes of DNA read at a time to find where a block's members disagree "
+                             "(not a limit on memory use)",
                              size_t(64 * 1024 * 1024));
     optionsParser->setDescription("Convert HAL alignment to handle graph");
 
@@ -185,8 +188,8 @@ int main(int argc, char** argv) {
     string outputFormat;
     size_t maxNodeLength;
     bool progress;
-    bool lowMemory;
-    size_t lowMemoryBuffer;
+    bool legacyConversion;
+    size_t baseBuffer;
     try {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
@@ -206,9 +209,11 @@ int main(int argc, char** argv) {
         
         maxNodeLength = optionsParser.getOption<size_t>("chop");
         progress = optionsParser.getFlag("progress");
-        lowMemory = optionsParser.getFlag("lowMemory");
-        lowMemoryBuffer = optionsParser.getOption<size_t>("lowMemoryBuffer");
-        if (lowMemoryBuffer == 0) throw hal_exception("--lowMemoryBuffer must be positive");
+        legacyConversion = optionsParser.getFlag("legacyConversion");
+        baseBuffer = optionsParser.getOption<size_t>("baseBuffer");
+        if (baseBuffer == 0) {
+            throw hal_exception("--baseBuffer must be positive");
+        }
     }
     catch(exception& e) {
         cerr << e.what() << endl;
@@ -391,7 +396,8 @@ int main(int argc, char** argv) {
             }
             const Genome* genome = alignment->openGenome(pinchGenomes[i]);
             pinch_genome(genome, threadSet, nameToID);
-            if (lowMemory) {
+            if (!legacyConversion) {
+                // nothing reads it again until the splits are planned, which reopens it
                 alignment->closeGenome(genome);
             }
         }
@@ -403,22 +409,25 @@ int main(int argc, char** argv) {
         stPinchThreadSet_joinTrivialBoundaries(threadSet);
 
         // the pinching above ran straight through mismatching bases, so blocks can hold more
-        // than one base at a position.  separate them, then merge again: what is left is
-        // blocks whose segments agree everywhere, which is what the graph needs
+        // than one base at a position, and the graph needs a node for each.  work out where
+        // every such block divides, and how, without touching the pinch graph: the nodes are
+        // made from that plan as the graph is built.  --legacyConversion instead separates
+        // them in the pinch graph and then merges again, which costs a pinch segment for
+        // every member of every piece and so far more memory
         vector<const Sequence*> IDToSequence;
         LowMemoryPlans lowMemoryPlans;
         build_id_to_sequence(alignment, threadGenomes, nameToID, IDToSequence);
-        if (lowMemory) {
-            build_low_memory_plans(threadSet, IDToSequence, lowMemoryPlans, progress, lowMemoryBuffer);
+        if (legacyConversion) {
+            split_blocks_by_base(threadSet, IDToSequence, progress);
+            stPinchThreadSet_joinTrivialBoundaries(threadSet);
+        } else {
+            build_low_memory_plans(threadSet, IDToSequence, lowMemoryPlans, progress, baseBuffer);
             // Plans own no HAL pointers. Release the cohort's arrays now; conversion
             // reopens only its current genome and reads one sequence at a time.
             IDToSequence.clear();
             for (const string& name : threadGenomes) {
                 alignment->closeGenome(alignment->openGenome(name));
             }
-        } else {
-            split_blocks_by_base(threadSet, IDToSequence, progress);
-            stPinchThreadSet_joinTrivialBoundaries(threadSet);
         }
 
         // building the pinch graph leaves the heap littered with small free chunks that the
@@ -469,10 +478,10 @@ int main(int argc, char** argv) {
                     cerr << "converting " << genomeName << " with " << genome->getNumSequences()
                          << " sequences and total length " << genome->getSequenceLength() << endl;
                 }
-                if (lowMemory) {
-                    pinch_to_handle_low_memory(genome, threadSet, nameToID, lowMemoryPlans, *graph, refNames);
-                } else {
+                if (legacyConversion) {
                     pinch_to_handle(genome, threadSet, IDToName, nameToID, *graph, refNames);
+                } else {
+                    pinch_to_handle_low_memory(genome, threadSet, nameToID, lowMemoryPlans, *graph, refNames);
                 }
 
                 alignment->closeGenome(genome);
@@ -484,9 +493,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (lowMemory) {
-            lowMemoryPlans.clear();
-        }
+        lowMemoryPlans.clear();
 
         // free the pinch graph
         stPinchThreadSet_destruct(threadSet);
@@ -1122,7 +1129,10 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
         vector<string> bases(degree);
         for (size_t i = 0; i < degree; ++i) {
             sequences[i] = IDToSequence.at(stPinchSegment_getName(result->members[i]));
-            if (sequences[i] == nullptr) throw runtime_error("missing HAL sequence in low-memory plan");
+            if (sequences[i] == nullptr) {
+                throw runtime_error("[hal2vg] no hal sequence for pinch thread " +
+                                    std::to_string(stPinchSegment_getName(result->members[i])));
+            }
             starts[i] = stPinchSegment_getStart(result->members[i]);
             forward[i] = stPinchSegment_getBlockOrientation(result->members[i]) != 0;
         }
@@ -1166,16 +1176,15 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
             storageBytes += result->plan.storage_bytes() + result->members.capacity() * sizeof(stPinchSegment*);
             plans.emplace(block, std::move(result));
         }
-        if (progress && visited % 10000 == 0) {
-            cerr << "[hal2vg-low-memory] blocks_visited=" << visited << " planned_blocks=" << plans.size()
-                 << " virtual_nodes=" << virtualNodes << " label_bytes=" << labelBytes << endl;
+        if (progress && visited % 1000000 == 0) {
+            cerr << "examined " << visited << " blocks: " << plans.size() << " to separate into "
+                 << virtualNodes << " nodes" << endl;
         }
     }
     if (progress) {
-        cerr << "[hal2vg-low-memory] planning_complete=1 blocks_visited=" << visited
-             << " planned_blocks=" << plans.size() << " virtual_nodes=" << virtualNodes
-             << " label_bytes=" << labelBytes << " plan_storage_bytes=" << storageBytes
-             << " base_buffer_bytes=" << bufferBytes << " path_spool_bytes=0" << endl;
+        cerr << "found " << plans.size() << " of " << visited << " blocks whose members disagreed,"
+             << " to be separated into " << virtualNodes << " nodes (" << labelBytes
+             << " bytes of labels, " << storageBytes << " bytes of plans in all)" << endl;
     }
 }
 
@@ -1196,7 +1205,7 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
         handle_t previous;
         auto emit = [&](uint64_t start, uint64_t length, bool reversed, uint64_t packed) {
             if (start > dna.size() || length > dna.size() - start || length == 0) {
-                throw runtime_error("invalid low-memory path interval for " + sequence->getFullName());
+                throw runtime_error("invalid path interval for " + sequence->getFullName());
             }
             string bases = dna.substr(start, length);
             if (reversed) reverseComplement(bases);
@@ -1207,13 +1216,13 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
                 handle = graph.create_handle(bases);
                 id = graph.get_id(handle);
                 if (id <= 0 || static_cast<uint64_t>(id) >= BLOCK_ID_LIMIT) {
-                    throw runtime_error("low-memory node id exceeds the block-node index");
+                    throw runtime_error("node id " + std::to_string(id) + " does not fit the per-block node index");
                 }
                 packed = pack_block_node(id, checksum);
             } else {
                 handle = graph.get_handle(id);
                 if (graph.get_length(handle) != length || unpack_block_checksum(packed) != checksum) {
-                    throw runtime_error("low-memory path disagrees with HAL for " + sequence->getFullName() +
+                    throw runtime_error("converted path disagrees with the hal for " + sequence->getFullName() +
                                         " at " + std::to_string(start));
                 }
             }
@@ -1259,7 +1268,7 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
             segmentStart += length;
         }
         if (pathLength != dna.size() || segmentStart != dna.size()) {
-            throw runtime_error("incorrect low-memory path length for " + sequence->getFullName());
+            throw runtime_error("Incorrect length in converted path for " + sequence->getFullName());
         }
     }
 }
