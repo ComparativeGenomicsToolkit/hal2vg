@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 5
+plan tests 7
 
 maf2hal small/small.maf small.hal
 hal2vg small.hal > small.vg
@@ -17,7 +17,13 @@ is $(vg validate small.vg | wc -l) 0 "output vg validates"
 # jq craziness from https://stackoverflow.com/questions/31930041/using-jq-or-alternative-command-line-tools-to-compare-json-files
 is $(jq --argjson a "$(cat small.json)" --argjson b "$(cat small/truth.json)" -n 'def post_recurse(f): def r: (f | select(. != null) | r), .; r; def post_recurse: post_recurse(.[]?); ($a | (post_recurse | arrays) |= sort) as $a | ($b | (post_recurse | arrays) |= sort) as $b | $a == $b') true "output graph identical to manually verified truth graph"
 
-rm -f small.vg small.json
+# --lowMemory never splits the pinch graph, so it can leave a node broken in two where the default
+# conversion joins it.  once both are unchopped there is no such difference left
+hal2vg small.hal --lowMemory > small.low.vg
+is $(vg validate small.low.vg | wc -l) 0 "--lowMemory output vg validates"
+is "$(vg mod -u small.low.vg | vg ids -s - | vg view - | sort)" "$(vg mod -u small.vg | vg ids -s - | vg view - | sort)" "--lowMemory output is the default output once both are unchopped"
+
+rm -f small.vg small.json small.low.vg
 
 rm -f small.hal 
 
