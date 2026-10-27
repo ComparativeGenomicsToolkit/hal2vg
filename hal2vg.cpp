@@ -105,7 +105,8 @@ static void initParser(CLParser* optionsParser) {
                                  false);
     optionsParser->addOptionFlag("legacyConversion",
                                  "split the pinch graph wherever a block's members disagree, as hal2vg used to. "
-                                 "needs much more memory, and makes the same graph up to node ids and unchopping",
+                                 "needs much more memory, and makes the same graph up to node ids, node "
+                                 "orientations and unchopping",
                                  false);
     optionsParser->addOption("baseBuffer",
                              "bytes of DNA read at a time to find where a block's members disagree "

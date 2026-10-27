@@ -11,10 +11,10 @@ Supports the three sequence graph formats in [libbdsg](https://github.com/vgteam
 ## Algorithm
 
 1. Each sequence in the HAL is added as a thread to a [Pinch Graph](https://github.com/ComparativeGenomicsToolkit/pinchesAndCacti).
-2. Exact pairwise alignment blocks (no gaps or substitutions) are extracted from each branch in the HAL tree and "pinched" in the graph
-3. For each branch, bases in the child that have substitutions in the parent (snps) are aligned across the tree using the column iterator and all exact matches are extracted and pinched.
-4. Pinch graph is cleaned up by merging trivial joins
-5. Each HAL sequence is traced through the pinch graph, adding nodes and edges to the output sequence graph.  A table is maintained to map each pinch graph block to a sequence graph node.
+2. Each genome is "pinched" to its parent in the HAL tree along every aligned segment, mismatches included.
+3. Pinch graph is cleaned up by merging trivial joins
+4. A block whose members disagree on a base anywhere must become more than one node.  Where each such block divides, and how, is worked out from the HAL's bases (see below).
+5. Each HAL sequence is traced through the pinch graph, adding nodes and edges to the output sequence graph.  Each block, or each piece of a divided block, becomes one node, made the first time a sequence reaches it.
 
 ## Suggested Postprocessing:
 
@@ -67,11 +67,12 @@ total size in bytes (default 67108864), and is not a limit on memory use.
 
 `--legacyConversion` instead splits those blocks in the pinch graph itself, as hal2vg used to,
 which costs a pinch segment for every member of every piece and so far more memory on large
-alignments.  The two make the same graph, apart from node IDs and a few nodes that the default
-leaves in two where `--legacyConversion` makes one (`vg mod -u` removes the difference).  So
-compare path metadata, spelled sequences and base-level homology rather than files or node
-counts.  `make test-low-memory` does that for generated HALs with substitutions, indels,
-reversals, paralogy, masked bases and path naming variants, and needs `vg` and Python 3.  For
-complete PackedGraph outputs, see [tests/graph_equivalence.md](tests/graph_equivalence.md).
+alignments.  The two make the same graph, apart from node IDs, the orientation in which some nodes
+are stored, and a few nodes that the default leaves in two where `--legacyConversion` makes one.
+`vg mod -u` removes the last of these but not the others, so compare path metadata, spelled
+sequences and base-level homology rather than files or node counts.  `make test-low-memory` does
+that for generated HALs with substitutions, indels, reversals, paralogy, masked bases and path
+naming variants, and needs `vg` and Python 3.  For complete PackedGraph outputs, see
+[tests/graph_equivalence.md](tests/graph_equivalence.md).
 
 Copyright (C) 2020 by UCSC Computational Genomics Lab
