@@ -144,6 +144,12 @@ static stPinchThread* thread_for_sequence(const Sequence* sequence,
                                           const unordered_map<string, int64_t>& nameToID,
                                           unordered_map<const Sequence*, stPinchThread*>& seqToThread);
 
+// both conversions make their paths here, so that they cannot disagree on how one is named
+static path_handle_t create_sequence_path(const Genome* genome,
+                                          const Sequence* sequence,
+                                          const vector<string>& refNames,
+                                          MutablePathMutableHandleGraph& graph);
+
 static void pinch_to_handle(const Genome* genome,
                             stPinchThreadSet* threadSet,
                             const vector<string>& IDToName,
@@ -802,6 +808,36 @@ static stPinchThread* thread_for_sequence(const Sequence* sequence,
     return thread;
 }
 
+// make the (still empty) path for a hal sequence: a reference path if its genome is one of
+// refNames, or if there are no refNames at all, and a haplotype path otherwise
+path_handle_t create_sequence_path(const Genome* genome,
+                                   const Sequence* sequence,
+                                   const vector<string>& refNames,
+                                   MutablePathMutableHandleGraph& graph) {
+    PathSense sense = PathSense::REFERENCE;
+    if (!refNames.empty() && !std::binary_search(refNames.begin(), refNames.end(), genome->getName())) {
+        sense = PathSense::HAPLOTYPE;
+    }
+
+    // cactus_graphmap_split can make paths like contig_sub_1_3.  here we convert that
+    // into a format vg can (sometimes) understand contig[1-3].
+    // (the reason we go through this is that assembly hubs can't handle any special characters apparently)
+    string parsed_name = sequence->getName();
+    subrange_t subpath = resolve_subpath_naming(parsed_name);
+    string parsed_genome_name = genome->getName();
+    size_t haplotype = resolve_haplotype_naming(parsed_genome_name);
+    if (haplotype == PathMetadata::NO_HAPLOTYPE) {
+        haplotype = 0;
+    }
+    return graph.create_path(sense,
+                             parsed_genome_name,
+                             parsed_name,
+                             haplotype,
+                             sense == PathSense::HAPLOTYPE ? 0 : PathMetadata::NO_PHASE_BLOCK,
+                             subpath,
+                             false);
+}
+
 // create nodes and edges for a genome using the pinch graph
 void pinch_to_handle(const Genome* genome,
                      stPinchThreadSet* threadSet,
@@ -813,31 +849,11 @@ void pinch_to_handle(const Genome* genome,
     // iterate over the sequences of the genome
     for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
         const Sequence *sequence = seqIt->getSequence();
-        PathSense sense = PathSense::REFERENCE;
-        if (!refNames.empty() && !std::binary_search(refNames.begin(), refNames.end(), genome->getName())) {
-            sense = PathSense::HAPLOTYPE;
-        }
         int64_t seqID = nameToID.find(sequence->getFullName())->second;
         stPinchThread* thread = stPinchThreadSet_getThread(threadSet, seqID);
 
-        // cactus_graphmap_split can make paths like contig_sub_1_3.  here we convert that
-        // into a format vg can (sometimes) understand contig[1-3].
-        // (the reason we go through this is that assembly hubs can't handle any special characters apparently)
-        string parsed_name = sequence->getName();
-        subrange_t subpath = resolve_subpath_naming(parsed_name);
-        string parsed_genome_name = genome->getName();
-        size_t haplotype = resolve_haplotype_naming(parsed_genome_name);
-        if (haplotype == PathMetadata::NO_HAPLOTYPE) {
-            haplotype = 0;
-        }
         // create the path
-        path_handle_t pathHandle = graph.create_path(sense,
-                                                     parsed_genome_name,
-                                                     parsed_name,
-                                                     haplotype,
-                                                     sense == PathSense::HAPLOTYPE ? 0 : PathMetadata::NO_PHASE_BLOCK,
-                                                     subpath,
-                                                     false);
+        path_handle_t pathHandle = create_sequence_path(genome, sequence, refNames, graph);
         // the converted path gets checked against the hal a segment at a time (below), so we
         // never need to hold a whole chromosome's worth of sequence in memory to do it
         size_t pathLength = 0;
@@ -1170,15 +1186,7 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
                                         const vector<string>& refNames) {
     for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); !seqIt->atEnd(); seqIt->toNext()) {
         const Sequence* sequence = seqIt->getSequence();
-        PathSense sense = !refNames.empty() && !binary_search(refNames.begin(), refNames.end(), genome->getName())
-            ? PathSense::HAPLOTYPE : PathSense::REFERENCE;
-        string parsedName = sequence->getName();
-        subrange_t subpath = resolve_subpath_naming(parsedName);
-        string parsedGenome = genome->getName();
-        size_t haplotype = resolve_haplotype_naming(parsedGenome);
-        if (haplotype == PathMetadata::NO_HAPLOTYPE) haplotype = 0;
-        path_handle_t path = graph.create_path(sense, parsedGenome, parsedName, haplotype,
-            sense == PathSense::HAPLOTYPE ? 0 : PathMetadata::NO_PHASE_BLOCK, subpath, false);
+        path_handle_t path = create_sequence_path(genome, sequence, refNames, graph);
         stPinchThread* thread = stPinchThreadSet_getThread(threadSet, nameToID.at(sequence->getFullName()));
         // One chromosome string avoids an HDF5 iterator setup for every output step.
         string dna;
