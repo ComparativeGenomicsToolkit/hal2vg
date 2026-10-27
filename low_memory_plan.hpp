@@ -122,6 +122,10 @@ public:
             throw std::length_error("low-memory split plan exceeds address space");
         }
         const size_t cells = plan.members * plan.runs;
+        // a plan lives until the graph is built, so give back what the vectors grew past
+        plan.nodes.shrink_to_fit();
+        plan.run_offsets.shrink_to_fit();
+        plan.run_nodes.shrink_to_fit();
         plan.labels.assign((cells * plan.bits + 7) / 8, 0);
         // Transpose once: subsequent path walks read each member's labels in order.
         for (size_t run = 0; run < plan.runs; ++run) {

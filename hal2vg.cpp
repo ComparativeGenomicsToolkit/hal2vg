@@ -190,6 +190,7 @@ int main(int argc, char** argv) {
     bool progress;
     bool legacyConversion;
     size_t baseBuffer;
+    bool halInMemory;
     try {
         optionsParser.parseOptions(argc, argv);
         halPath = optionsParser.getArgument<string>("halFile");
@@ -214,6 +215,8 @@ int main(int argc, char** argv) {
         if (baseBuffer == 0) {
             throw hal_exception("--baseBuffer must be positive");
         }
+        // hal reads these itself; getFlagAlt would warn about --inMemory a second time
+        halInMemory = optionsParser.getFlag("hdf5InMemory") || optionsParser.getFlag("inMemory");
     }
     catch(exception& e) {
         cerr << e.what() << endl;
@@ -396,8 +399,11 @@ int main(int argc, char** argv) {
             }
             const Genome* genome = alignment->openGenome(pinchGenomes[i]);
             pinch_genome(genome, threadSet, nameToID);
-            if (!legacyConversion) {
-                // nothing reads it again until the splits are planned, which reopens it
+            if (!legacyConversion && !halInMemory) {
+                // nothing reads it again until the splits are planned, which reopens it.
+                // closing it gives back its hdf5 chunk caches, but a genome held in memory
+                // would only be read in again whole, for no saving: its arrays are back by
+                // the time the splits are planned, which is where memory peaks
                 alignment->closeGenome(genome);
             }
         }
@@ -1120,6 +1126,8 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
         ++visited;
         if (stPinchBlock_getDegree(block) < 2) continue;
         auto result = unique_ptr<LowMemoryBlock>(new LowMemoryBlock());
+        // the plans are kept until the graph is built, so none of their space should be spare
+        result->members.reserve(stPinchBlock_getDegree(block));
         stPinchBlockIt memberIt = stPinchBlock_getSegmentIterator(block);
         for (stPinchSegment* member = stPinchBlockIt_getNext(&memberIt); member != nullptr;
              member = stPinchBlockIt_getNext(&memberIt)) {
@@ -1181,7 +1189,10 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
             result->plan = builder.finish();
             virtualNodes += result->plan.nodes.size();
             labelBytes += result->plan.labels.size();
-            storageBytes += result->plan.storage_bytes() + result->members.capacity() * sizeof(stPinchSegment*);
+            // the block itself and its entry in the plans table are about as big as its
+            // vectors are on a small block, so they are counted too
+            storageBytes += result->plan.storage_bytes() + result->members.capacity() * sizeof(stPinchSegment*) +
+                sizeof(LowMemoryBlock) + sizeof(LowMemoryPlans::value_type) + 2 * sizeof(void*);
             plans.emplace(block, std::move(result));
         }
         if (progress && visited % 1000000 == 0) {
@@ -1192,7 +1203,7 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
     if (progress) {
         cerr << "found " << plans.size() << " of " << visited << " blocks whose members disagreed,"
              << " to be separated into " << virtualNodes << " nodes (" << labelBytes
-             << " bytes of labels, " << storageBytes << " bytes of plans in all)" << endl;
+             << " bytes of labels, about " << storageBytes << " bytes of plans in all)" << endl;
     }
 }
 
@@ -1212,7 +1223,9 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
         bool havePrevious = false;
         handle_t previous;
         auto emit = [&](uint64_t start, uint64_t length, bool reversed, uint64_t packed) {
-            if (start > dna.size() || length > dna.size() - start || length == 0) {
+            // the one empty interval is an empty sequence's: its thread is a single segment of
+            // length 0, which --legacyConversion makes into an empty node, and so does this
+            if (start > dna.size() || length > dna.size() - start || (length == 0 && !dna.empty())) {
                 throw runtime_error("invalid path interval for " + sequence->getFullName());
             }
             string bases = dna.substr(start, length);
