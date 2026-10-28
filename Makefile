@@ -76,43 +76,43 @@ ${jemallocPath}/lib/libjemalloc.a :
 	  env CFLAGS="-O3 -g" CXXFLAGS="-O3 -g" LDFLAGS="" LIBS="" ${MAKE} build_lib_static
 
 hal2vg : hal2vg.o ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} -fopenmp -pthread hal2vg.o  ${basicLibs}  -o hal2vg
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread hal2vg.o  ${basicLibs}  -o hal2vg
 
 clip-vg.o : clip-vg.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . clip-vg.cpp -c
 
 clip-vg : clip-vg.o ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} -fopenmp -pthread clip-vg.o  ${basicLibs}  -o clip-vg
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread clip-vg.o  ${basicLibs}  -o clip-vg
 
 halRemoveDupes.o : halRemoveDupes.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . halRemoveDupes.cpp -c
 
 halRemoveDupes : halRemoveDupes.o ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} -fopenmp -pthread halRemoveDupes.o  ${basicLibs}  -o halRemoveDupes
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread halRemoveDupes.o  ${basicLibs}  -o halRemoveDupes
 
 halMergeChroms.o : halMergeChroms.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . halMergeChroms.cpp -c
 
 halMergeChroms : halMergeChroms.o ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} -fopenmp -pthread halMergeChroms.o  ${basicLibs}  -o halMergeChroms
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread halMergeChroms.o  ${basicLibs}  -o halMergeChroms
 
 halUnclip.o : halUnclip.cpp subpaths.h ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . halUnclip.cpp -c
 
 halUnclip : halUnclip.o ${basicLibsDependencies} 
-	${cpp} ${CXXFLAGS} -fopenmp -pthread halUnclip.o  ${basicLibs}  -o halUnclip
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread halUnclip.o  ${basicLibs}  -o halUnclip
 
 filter-paf-deletions.o : filter-paf-deletions.cpp subpaths.h paf.hpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . filter-paf-deletions.cpp -c
 
 filter-paf-deletions : filter-paf-deletions.o ${basicLibsDependencies} 
-	${cpp} ${CXXFLAGS} -fopenmp -pthread filter-paf-deletions.o  ${basicLibs}  -o filter-paf-deletions
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread filter-paf-deletions.o  ${basicLibs}  -o filter-paf-deletions
 
 count-vg-hap-cov.o : count-vg-hap-cov.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . count-vg-hap-cov.cpp -c
 
 count-vg-hap-cov : count-vg-hap-cov.o ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} -fopenmp -pthread count-vg-hap-cov.o  ${basicLibs}  -o count-vg-hap-cov
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread count-vg-hap-cov.o  ${basicLibs}  -o count-vg-hap-cov
 
 test :
 	${MAKE}
