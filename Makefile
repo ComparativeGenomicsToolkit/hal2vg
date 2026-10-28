@@ -31,7 +31,7 @@ clean :
 	cd deps/libbdsg-easy && ${MAKE} clean
 	if [ -e deps/jemalloc/Makefile ] ; then cd deps/jemalloc && ${MAKE} clean ; fi
 
-hal2vg.o : hal2vg.cpp ${basicLibsDependencies}
+hal2vg.o : hal2vg.cpp low_memory_plan.hpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . hal2vg.cpp -c
 
 # These recurse into submodules whose own makefiles know how to rebuild themselves, but
@@ -117,8 +117,18 @@ count-vg-hap-cov : count-vg-hap-cov.o ${basicLibsDependencies}
 test :
 	${MAKE}
 	${MAKE} test-only
+	${MAKE} test-low-memory
 
 # run the tests against whatever binaries are already sitting in the tree.  the release
 # build makes static ones, and a plain make would relink them dynamically before testing
 test-only :
 	cd tests && prove -v t
+
+tests/low_memory_plan: tests/low_memory_plan.cpp low_memory_plan.hpp
+	${cpp} ${CXXFLAGS} -I . tests/low_memory_plan.cpp -o tests/low_memory_plan
+
+.PHONY: test-low-memory
+test-low-memory: hal2vg tests/low_memory_plan
+	./tests/low_memory_plan
+	python3 tests/low_memory_regression.py
+
