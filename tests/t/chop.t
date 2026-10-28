@@ -46,7 +46,7 @@ same_path_seqs() { # $1=before  $2=after
 vg convert -g chop/tiny-flat.gfa -p > tiny-flat.vg
 printf "x\t0\t100\n" > all.bed
 clip-vg tiny-flat.vg -b all.bed | vg view - | grep -v ^H > chopped-all.gfa
-is "$(cat chopped-all.gfa | wc -l)" 0 "chopping everything clears out the graph"
+is "$(cat chopped-all.gfa | wc -l | tr -d ' ')" 0 "chopping everything clears out the graph"
 
 rm -f all.bed chopped-all.gfa
 
@@ -71,12 +71,12 @@ printf "x\t1\t5\n" >> bits.bed
 printf "x\t10\t20\n" >> bits.bed
 printf "x\t40\t49\n" >> bits.bed
 clip-vg -n tiny-flat.vg -b bits.bed > chopped-bits.vg
-vg paths -Ev chopped-bits.vg | sed -e 's/\t/./g' >  bits.paths
-is "$(cat bits.paths | wc -l)" "4" "correct number of paths obtained after merging consectuive intervals"
-is "$(grep 'x\[0-1\].1' bits.paths | wc -l)" "1" "first bit found"
-is "$(grep 'x\[5-10\].5' bits.paths | wc -l)" "1" "next bit found"
-is "$(grep 'x\[25-40\].15' bits.paths | wc -l)" "1" "next bit after found"
-is "$(grep 'x\[49-50\].1' bits.paths | wc -l)" "1" "last bit found"
+vg paths -Ev chopped-bits.vg | tr '\t' '.' >  bits.paths
+is "$(cat bits.paths | wc -l | tr -d ' ')" "4" "correct number of paths obtained after merging consectuive intervals"
+is "$(grep 'x\[0-1\].1' bits.paths | wc -l | tr -d ' ')" "1" "first bit found"
+is "$(grep 'x\[5-10\].5' bits.paths | wc -l | tr -d ' ')" "1" "next bit found"
+is "$(grep 'x\[25-40\].15' bits.paths | wc -l | tr -d ' ')" "1" "next bit after found"
+is "$(grep 'x\[49-50\].1' bits.paths | wc -l | tr -d ' ')" "1" "last bit found"
 
 rm -f bits.bed chopped-bits.vg bits.paths
 
@@ -88,7 +88,7 @@ vg convert -g chop/tiny-rev.gfa -p > tiny-rev.vg
 #vg convert -g chop/tiny-rev.gfa -o > tiny-rev.vg
 printf "x\t0\t100\n" > all.bed
 clip-vg tiny-rev.vg -b all.bed | vg view - | grep -v ^H > chopped-all.gfa
-is "$(cat chopped-all.gfa | wc -l)" 0 "chopping everything clears out the graph"
+is "$(cat chopped-all.gfa | wc -l | tr -d ' ')" 0 "chopping everything clears out the graph"
 
 rm -f all.bed chopped-all.gfa
 
@@ -105,12 +105,12 @@ printf "x\t1\t5\n" >> bits.bed
 printf "x\t10\t20\n" >> bits.bed
 printf "x\t40\t49\n" >> bits.bed
 clip-vg -n tiny-rev.vg -b bits.bed > chopped-bits.vg
-vg paths -Ev chopped-bits.vg | sed -e 's/\t/./g' >  bits.paths
-is "$(cat bits.paths | wc -l)" "4" "correct number of paths obtained after merging consectuive intervals"
-is "$(grep 'x\[0-1\].1' bits.paths | wc -l)" "1" "first bit found"
-is "$(grep 'x\[5-10\].5' bits.paths | wc -l)" "1" "next bit found"
-is "$(grep 'x\[25-40\].15' bits.paths | wc -l)" "1" "next bit after found"
-is "$(grep 'x\[49-50\].1' bits.paths | wc -l)" "1" "last bit found"
+vg paths -Ev chopped-bits.vg | tr '\t' '.' >  bits.paths
+is "$(cat bits.paths | wc -l | tr -d ' ')" "4" "correct number of paths obtained after merging consectuive intervals"
+is "$(grep 'x\[0-1\].1' bits.paths | wc -l | tr -d ' ')" "1" "first bit found"
+is "$(grep 'x\[5-10\].5' bits.paths | wc -l | tr -d ' ')" "1" "next bit found"
+is "$(grep 'x\[25-40\].15' bits.paths | wc -l | tr -d ' ')" "1" "next bit after found"
+is "$(grep 'x\[49-50\].1' bits.paths | wc -l | tr -d ' ')" "1" "last bit found"
 
 rm -f bits.bed chopped-bits.vg bits.paths
 
@@ -242,7 +242,7 @@ rm -f nr-rev.vg nr-rev-fwd.vg nr-rev-none.vg nr-rev-none.err nr-rev-u.vg nr-rev-
     printf 'H\tVN:Z:1.0\n'
     for i in $(seq 12); do printf 'S\t%s\tACGTACGTAC\n' "$i"; done
     for i in $(seq 11); do printf 'L\t%s\t+\t%s\t+\t0M\n' "$i" "$((i+1))"; done
-    seg="$(seq 12 | sed 's/$/+/' | paste -sd,)"
+    seg="$(seq 12 | sed 's/$/+/' | paste -sd, -)"
     printf 'P\tREF#0#chr1\t%s\t*\n' "$seg"
     printf 'P\tSAMP#0#chr1\t%s\t*\n' "$seg"
     printf 'P\t_MINIGRAPH_#0#a\t1+,2+\t*\n'
