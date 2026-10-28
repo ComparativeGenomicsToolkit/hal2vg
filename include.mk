@@ -32,6 +32,20 @@ ifdef DISABLE_JEMALLOC
 	jemalloc = off
 endif
 
+# OpenMP.  The binaries here only call the omp_ API (the parallel loops are in libbdsg), so they
+# need its header and library but no -fopenmp to compile.  Apple clang has no -fopenmp, and
+# Homebrew's libomp is keg-only, so on Mac they are found through brew.
+ifeq (${SYS},Darwin)
+	libompPrefix := $(shell brew --prefix libomp 2>/dev/null)
+	ifneq (${libompPrefix},)
+		CXXFLAGS += -I${libompPrefix}/include
+		ompLibs = -L${libompPrefix}/lib
+	endif
+	ompLibs += -lomp
+else
+	ompLibs = -fopenmp
+endif
+
 CFLAGS += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath}
 CXXFLAGS += -std=c++20 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
 basicLibs = ${halPath}/libHal.a ${sonLibPath}/stPinchesAndCacti.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
