@@ -6,7 +6,7 @@ BASH_TAP_ROOT=./bash-tap
 PATH=..:$PATH
 PATH=../deps/hal/bin:$PATH
 
-plan tests 10
+plan tests 12
 
 maf2hal small/small.maf small.hal
 maf2hal small/small2.maf small2.hal
@@ -71,3 +71,14 @@ rm -f small.hal small2.halsmall.vg small2.vg small.gfa small2.gfa
 rm -f merged1.hal merged1.vg merged1.comp1.gfa merged1.comp2.gfa
 rm -f chimp.fa chimp.merge.fa
 rm -f cat.fa cat.merge.fa
+
+### a tree deeper than a star ###
+
+# merge_hals only copies the root and its children, so the rest of a deeper tree must be refused, not dropped
+halRandGen --preset small --seed 0 --testRand deep.hal
+halMergeChroms deep.hal deep.merged.hal 2> deep.err
+isnt $? 0 "halMergeChroms refuses a tree that isn't a star"
+grep -q "Genome_1 in deep.hal has children" deep.err
+is $? 0 "halMergeChroms names the internal genome"
+
+rm -f deep.hal deep.merged.hal deep.err

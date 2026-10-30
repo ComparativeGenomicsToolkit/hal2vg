@@ -63,6 +63,11 @@ static pair<string, unordered_map<string, vector<Sequence::Info>>> get_hal_dimen
         }
         for (const string& genome_name : genome_names) {
             const Genome* genome = alignment->openGenome(genome_name);
+            // only the root and its children get copied, so anything below them would be silently dropped
+            if (genome->getParent() && genome->getNumChildren() > 0) {
+                throw hal_exception("Only star trees (the root's children are all leaves) can be merged, but " +
+                                    genome_name + " in " + hal_path + " has children");
+            }
             vector<Sequence::Info>& genome_dimensions = dimensions[genome_name];
             // for every sequence
             for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
