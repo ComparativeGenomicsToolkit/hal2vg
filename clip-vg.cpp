@@ -1103,6 +1103,19 @@ void flip_node(MutablePathMutableHandleGraph* graph, nid_t node_id) {
     if (graph->has_edge(graph->flip(handle), handle)) {
         graph->create_edge(graph->flip(flipped_handle), flipped_handle);
     }
+    if (auto* packed = dynamic_cast<PackedGraph*>(graph)) {
+        // Older libbdsg builds still use the generic segment rewrite below.
+        auto transfer = [](auto& packed_graph, const handle_t& from, const handle_t& to) {
+            if constexpr (requires { packed_graph.move_path_steps(from, to); }) {
+                return packed_graph.move_path_steps(from, to);
+            }
+            return false;
+        };
+        if (transfer(*packed, handle, flipped_handle)) {
+            packed->destroy_handle(handle);
+            return;
+        }
+    }
     vector<step_handle_t> steps = graph->steps_of_handle(handle);
     for (step_handle_t step : steps) {
         step_handle_t next_step = graph->get_next_step(step);
