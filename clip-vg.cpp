@@ -708,9 +708,14 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     size_t chopped_bases = 0;
     
     // careful not to iterate and chop, as we could hit new subpaths made
-    vector<path_handle_t> path_handles;    
+    const bool retire_early = force_clip && dynamic_cast<PackedGraph*>(graph);
+    size_t total_steps = 0;
+    vector<path_handle_t> path_handles;
     graph->for_each_path_handle([&](path_handle_t path_handle) {
             path_handles.push_back(path_handle);
+            if (retire_early) {
+                total_steps += graph->get_step_count(path_handle);
+            }
         });
 
     // when force_clip is true, store handles here to given them second chance at destruction
@@ -721,6 +726,13 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
     // paths to destroy (faster to do in single api call)
     vector<path_handle_t> paths_to_destroy;
     
+    // Force-clipping makes node removal decisions after all paths are cut.
+    // Release original paths in bounded batches to avoid retaining the whole
+    // unclipped graph's paths alongside all the replacement subpaths.
+    // Cap the number of batches too: destroy_paths scans node membership
+    // lists, and many tiny batches would repeat that work excessively.
+    const size_t retire_after_steps = max(size_t{1} << 20, total_steps / 8 + 1);
+    size_t pending_steps = 0;
     for (auto path_handle : path_handles) {
         string path_name = graph->get_path_name(path_handle);
         auto it = bed_intervals.find(path_name);
@@ -739,6 +751,14 @@ void chop_path_intervals(MutablePathMutableHandleGraph* graph,
                 cerr << "adding path to destroy list" << graph->get_path_name(path_handle) << endl;
 #endif
                 paths_to_destroy.push_back(path_handle);
+                if (retire_early) {
+                    pending_steps += graph->get_step_count(path_handle);
+                    if (pending_steps >= retire_after_steps) {
+                        graph->destroy_paths(paths_to_destroy);
+                        paths_to_destroy.clear();
+                        pending_steps = 0;
+                    }
+                }
                 for (handle_t handle : chopped_handles) {
                     if (force_clip) {
                         to_destroy.insert(graph->get_id(handle));
