@@ -8,6 +8,12 @@ halRootPath=deps/hal
 halPath=${halRootPath}/lib
 halIncPath=${halRootPath}/api/inc
 
+# HAL format 3 (hal's format3/), which hal2vg reads beside HDF5 and mmap: its library and the
+# two it is built on, liftmap and twobit64 (hal's submodules).  liftmap is built without its
+# HTTP backend, so there is no libcurl to link
+hal3IncPath=${halRootPath}/format3/inc
+hal3Libs = ${halPath}/libHal3.a ${halRootPath}/submodules/twobit64/libtwobit64.a ${halRootPath}/submodules/liftmap/libliftmap.a
+
 libbdsgPath=${rootPath}/deps/libbdsg-easy
 
 jemallocPath=${rootPath}/deps/jemalloc
@@ -47,7 +53,7 @@ else
 endif
 
 CFLAGS += -I ${sonLibPath}  -I ${halPath} -I ${halIncPath}
-CXXFLAGS += -std=c++20 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${libbdsgPath}/include -UNDEBUG
+CXXFLAGS += -std=c++20 -I ${sonLibPath}  -I ${halPath} -I ${halIncPath} -I ${hal3IncPath} -I ${libbdsgPath}/include -UNDEBUG
 basicLibs = ${halPath}/libHal.a ${sonLibPath}/stPinchesAndCacti.a ${sonLibPath}/sonLib.a ${sonLibPath}/cuTest.a ${libbdsgPath}/lib/libbdsg.a ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a
 ifeq (${jemalloc},on)
 	basicLibs += ${jemallocPath}/lib/libjemalloc.a

@@ -47,7 +47,13 @@ allocator anywhere else.
 
 ## Usage
 
-It is required to use the `--inMemory` option for all but trivial inputs.
+hal2vg reads HAL files (HDF5 or mmap) and [HAL format 3](https://github.com/ComparativeGenomicsToolkit/hal)
+alignments, a single `.hal` file or a directory, as `hal convert` and Cactus's `--halFormat 3` write
+them.  It tells which from the input itself.  An alignment converted to format 3 makes the same graph
+as the HAL it came from.
+
+It is required to use the `--inMemory` option for all but trivial HDF5 inputs.  On format 3 it is
+accepted and does nothing.
 
 `vg` has been tuned to work best on graphs with nodes chopped to at most 32 bases.  It is therefore recommended to use the `--chop 32` option.
 

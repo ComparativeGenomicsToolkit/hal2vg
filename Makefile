@@ -31,7 +31,7 @@ clean :
 	cd deps/libbdsg-easy && ${MAKE} clean
 	if [ -e deps/jemalloc/Makefile ] ; then cd deps/jemalloc && ${MAKE} clean ; fi
 
-hal2vg.o : hal2vg.cpp low_memory_plan.hpp ${basicLibsDependencies}
+hal2vg.o : hal2vg.cpp low_memory_plan.hpp ${basicLibsDependencies} ${hal3Libs}
 	${cpp} ${CXXFLAGS} -I . hal2vg.cpp -c
 
 # These recurse into submodules whose own makefiles know how to rebuild themselves, but
@@ -59,6 +59,7 @@ ${libbdsgPath}/lib/libbdsg.a :
 # These archives come out of the builds above as byproducts.  Without saying so, make -j
 # on a fresh clone finds no rule for them and stops before the build that makes them runs.
 ${sonLibPath}/cuTest.a : ${sonLibPath}/sonLib.a ;
+${hal3Libs} : ${halPath}/libHal.a ;
 ${libbdsgPath}/lib/libhandlegraph.a ${libbdsgPath}/lib/libsdsl.a ${libbdsgPath}/lib/libdivsufsort.a ${libbdsgPath}/lib/libdivsufsort64.a : ${libbdsgPath}/lib/libbdsg.a ;
 
 # jemalloc is vendored (rather than taken from the system) so that the static release
@@ -75,8 +76,8 @@ ${jemallocPath}/lib/libjemalloc.a :
 	  env CFLAGS="-O3 -g" CXXFLAGS="-O3 -g" LDFLAGS="" LIBS="" ./configure --disable-libdl && \
 	  env CFLAGS="-O3 -g" CXXFLAGS="-O3 -g" LDFLAGS="" LIBS="" ${MAKE} build_lib_static
 
-hal2vg : hal2vg.o ${basicLibsDependencies}
-	${cpp} ${CXXFLAGS} ${ompLibs} -pthread hal2vg.o  ${basicLibs}  -o hal2vg
+hal2vg : hal2vg.o ${basicLibsDependencies} ${hal3Libs}
+	${cpp} ${CXXFLAGS} ${ompLibs} -pthread hal2vg.o  ${hal3Libs} ${basicLibs} -lz -o hal2vg
 
 clip-vg.o : clip-vg.cpp ${basicLibsDependencies}
 	${cpp} ${CXXFLAGS} -I . clip-vg.cpp -c

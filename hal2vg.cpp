@@ -14,7 +14,9 @@
 #include <cassert>
 #include <fstream>
 #include <deque>
+#include <functional>
 #include <unordered_map>
+#include <sys/stat.h>
 #include "low_memory_plan.hpp"
 #if defined(__GLIBC__) && !defined(HAVE_JEMALLOC)
 #include <malloc.h>
@@ -24,6 +26,7 @@
 #include "bdsg/packed_graph.hpp"
 #include "bdsg/hash_graph.hpp"
 #include "hal.h"
+#include "hal3/hal3.h"
 
 using namespace std;
 using namespace hal;
@@ -75,6 +78,335 @@ static inline uint32_t sequence_checksum(const string& seq) {
     return ((h >> 22) ^ h) & 0x3fffffu;
 }
 
+// One run of the branch above a genome: [childStart, childStart + length) of the genome's
+// sequence childSequence aligned, gapless and colinear, to [parentStart, parentStart + length)
+// of its parent's sequence parentSequence.  reversed pairs childStart + i with
+// parentStart + length - 1 - i.  Positions are in the sequences, not the genomes.
+struct AlignedRun {
+    uint32_t childSequence;
+    uint32_t parentSequence;
+    int64_t childStart;
+    int64_t parentStart;
+    int64_t length;
+    bool reversed;
+};
+
+// a sequence: its genome's number in the AlignmentReader, and its own index in that genome
+struct SequenceRef {
+    uint32_t genome;
+    uint32_t sequence;
+};
+
+// What hal2vg reads of an alignment -- the tree, the genomes' sequences, the runs of each
+// branch and the bases -- from either of two backends: HAL's own API, which reads HDF5 and
+// mmap files, or HAL format 3 (a pack file, or a directory holding a manifest).  Genomes are
+// numbered in the order the backend lists them, the root first and every genome after its
+// parent; a sequence is known by its index in its genome.
+class AlignmentReader {
+public:
+    virtual ~AlignmentReader() {}
+
+    size_t num_genomes() const { return names.size(); }
+    const string& genome_name(size_t genome) const { return names.at(genome); }
+    // -1 if there is no such genome
+    int64_t find_genome(const string& name) const {
+        unordered_map<string, size_t>::const_iterator found = index.find(name);
+        return found == index.end() ? -1 : (int64_t)found->second;
+    }
+    size_t root() const { return 0; }
+    // -1 for the root
+    int64_t parent(size_t genome) const { return parents.at(genome); }
+    const vector<size_t>& children(size_t genome) const { return childLists.at(genome); }
+
+    virtual size_t num_sequences(size_t genome) = 0;
+    virtual string sequence_name(size_t genome, size_t sequence) = 0;
+    virtual int64_t sequence_length(size_t genome, size_t sequence) = 0;
+    // every run of the branch above a genome other than the root, in the order of the
+    // genome's sequences and, within one, of position
+    virtual void scan_runs(size_t genome, const function<void(const AlignedRun&)>& visit) = 0;
+    // bases [start, start + length) of a sequence, forward strand, soft-masked ones in lower case
+    virtual void fetch(size_t genome, size_t sequence, int64_t start, int64_t length, string& out) = 0;
+    // nothing of the genome is wanted again soon: give back what is held for it
+    virtual void release(size_t genome) {}
+
+protected:
+    // the root first, then every genome after its parent, a genome's children in their order
+    void add_genome(const string& name, int64_t parentGenome) {
+        if (parentGenome < 0 ? !names.empty() : (size_t)parentGenome >= names.size()) {
+            throw runtime_error("[hal2vg] genome " + name + " is listed before its parent");
+        }
+        if (!index.insert(make_pair(name, names.size())).second) {
+            throw runtime_error("[hal2vg] two genomes are named " + name);
+        }
+        if (parentGenome >= 0) {
+            childLists[parentGenome].push_back(names.size());
+        }
+        names.push_back(name);
+        parents.push_back(parentGenome);
+        childLists.emplace_back();
+    }
+
+private:
+    vector<string> names;
+    vector<int64_t> parents;
+    vector<vector<size_t>> childLists;
+    unordered_map<string, size_t> index;
+};
+
+// HAL's API: HDF5 and mmap files.  A genome is opened when something of it is first asked for,
+// and closed by release(), so that only the genomes in use hold their HDF5 caches.
+class HalReader : public AlignmentReader {
+public:
+    HalReader(const string& path, CLParser* options) : alignment(openHalAlignment(path, options)) {
+        if (alignment->getNumGenomes() == 0) {
+            throw hal_exception("input hal alignmenet is empty");
+        }
+        // breadth first, which lists every genome after its parent
+        deque<pair<string, int64_t>> queue = {make_pair(alignment->getRootName(), (int64_t)-1)};
+        while (!queue.empty()) {
+            pair<string, int64_t> next = queue.front();
+            queue.pop_front();
+            const int64_t genome = num_genomes();
+            add_genome(next.first, next.second);
+            for (const string& child : alignment->getChildNames(next.first)) {
+                queue.push_back(make_pair(child, genome));
+            }
+        }
+        open.assign(num_genomes(), nullptr);
+        sequences.resize(num_genomes());
+    }
+
+    size_t num_sequences(size_t genome) override {
+        return sequences_of(genome).size();
+    }
+    string sequence_name(size_t genome, size_t sequence) override {
+        return sequences_of(genome).at(sequence)->getName();
+    }
+    int64_t sequence_length(size_t genome, size_t sequence) override {
+        return sequences_of(genome).at(sequence)->getSequenceLength();
+    }
+    void fetch(size_t genome, size_t sequence, int64_t start, int64_t length, string& out) override {
+        sequences_of(genome).at(sequence)->getSubString(out, start, length);
+    }
+    void release(size_t genome) override {
+        if (open.at(genome) != nullptr) {
+            alignment->closeGenome(open[genome]);
+            open[genome] = nullptr;
+            vector<const Sequence*>().swap(sequences[genome]);
+        }
+    }
+
+    void scan_runs(size_t genome, const function<void(const AlignedRun&)>& visit) override {
+        const int64_t parentGenome = parent(genome);
+        if (parentGenome < 0) {
+            return;
+        }
+        const Genome* child = genome_of(genome);
+        // opened here rather than by getParent() below, so that release() knows to close it
+        genome_of(parentGenome);
+        TopSegmentIteratorPtr topIt = child->getTopSegmentIterator();
+        BottomSegmentIteratorPtr botIt = child->getParent()->getBottomSegmentIterator();
+
+        // consecutive segments are merged, for fewer pinches
+        AlignedRun run;
+        bool haveRun = false;
+        for (; not topIt->atEnd(); topIt->toRight()) {
+            if (!topIt->tseg()->hasParent()) {
+                continue;
+            }
+            botIt->toParent(topIt);
+            const Sequence* topSeq = topIt->tseg()->getSequence();
+            const Sequence* botSeq = botIt->bseg()->getSequence();
+            const bool reversed = botIt->getReversed();
+            const int64_t length = topIt->getLength();
+            const int64_t start1 = topIt->tseg()->getStartPosition() - topSeq->getStartPosition();
+            const int64_t start2 = !reversed ? botIt->bseg()->getStartPosition() - botSeq->getStartPosition()
+                : botIt->bseg()->getEndPosition() - length + 1 - botSeq->getStartPosition();
+            const uint32_t childSequence = topSeq->getArrayIndex();
+            const uint32_t parentSequence = botSeq->getArrayIndex();
+
+            // are we dealing with two consecutive segments?
+            bool canMerge = haveRun &&
+                childSequence == run.childSequence &&
+                parentSequence == run.parentSequence &&
+                start1 == run.childStart + run.length &&
+                reversed == run.reversed &&
+                ((!reversed && start2 == run.parentStart + run.length) ||
+                 (reversed && start2 + length == run.parentStart));
+            if (canMerge) {
+                run.length += length;
+                if (reversed) {
+                    run.parentStart = start2;
+                }
+            } else {
+                if (haveRun) {
+                    visit(run);
+                }
+                run = AlignedRun{childSequence, parentSequence, start1, start2, length, reversed};
+                haveRun = true;
+            }
+        }
+        if (haveRun) {
+            visit(run);
+        }
+    }
+
+private:
+    const Genome* genome_of(size_t genome) {
+        if (open.at(genome) == nullptr) {
+            open[genome] = alignment->openGenome(genome_name(genome));
+            if (open[genome] == nullptr) {
+                throw hal_exception("genome " + genome_name(genome) + " not found in alignment");
+            }
+        }
+        return open[genome];
+    }
+    // the genome's sequences, in order: a Sequence's index in its genome is its array index
+    const vector<const Sequence*>& sequences_of(size_t genome) {
+        const Genome* g = genome_of(genome);
+        vector<const Sequence*>& list = sequences[genome];
+        if (list.size() != g->getNumSequences()) {
+            list.clear();
+            for (SequenceIteratorPtr seqIt = g->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
+                // not the iterator's pointer: an mmap hal's iterator hands out its own member,
+                // which is gone once the iterator moves on.  the genome's own object lasts as
+                // long as the genome is open, in either format
+                const Sequence* sequence = g->getSequence(seqIt->getSequence()->getName());
+                if (sequence == nullptr || sequence->getArrayIndex() != (hal_index_t)list.size()) {
+                    throw runtime_error("[hal2vg] sequences of " + genome_name(genome) + " are not in array order");
+                }
+                list.push_back(sequence);
+            }
+        }
+        return list;
+    }
+
+    AlignmentConstPtr alignment;
+    vector<const Genome*> open;
+    vector<vector<const Sequence*>> sequences;
+};
+
+// HAL format 3, through its API.  Nothing needs releasing but the DNA reader's block lists.
+class Format3Reader : public AlignmentReader {
+public:
+    explicit Format3Reader(const string& path) :
+        alignment(hal3::api::Alignment::open(path)), branches(alignment), dna(alignment) {
+        // the root first, then a preorder, which lists every genome after its parent and a
+        // genome's children in their order
+        unordered_map<const hal3::api::Genome*, size_t> number;
+        for (const hal3::api::Genome* genome : alignment->genomes()) {
+            const int64_t parentGenome = genome->parent() == nullptr ? -1 : (int64_t)number.at(genome->parent());
+            number[genome] = genomes.size();
+            genomes.push_back(genome);
+            add_genome(genome->name(), parentGenome);
+        }
+    }
+
+    size_t num_sequences(size_t genome) override {
+        return genomes.at(genome)->numSequences();
+    }
+    string sequence_name(size_t genome, size_t sequence) override {
+        return genomes.at(genome)->sequenceName(sequence);
+    }
+    int64_t sequence_length(size_t genome, size_t sequence) override {
+        return genomes.at(genome)->sequenceLength(sequence);
+    }
+    void fetch(size_t genome, size_t sequence, int64_t start, int64_t length, string& out) override {
+        dna.fetch(genomes.at(genome), sequence, start, start + length, out);
+    }
+    void release(size_t genome) override {
+        dna.recycle();
+    }
+    void scan_runs(size_t genome, const function<void(const AlignedRun&)>& visit) override {
+        if (parent(genome) < 0) {
+            return;
+        }
+        // runs are maximal already: there is nothing to merge
+        branches.scan(genomes.at(genome), [&](const hal3::api::Run& run) {
+            visit(AlignedRun{run.childSeq, run.parentSeq, run.childStart, run.parentStart, run.length, run.reversed});
+        });
+    }
+
+private:
+    shared_ptr<const hal3::api::Alignment> alignment;
+    hal3::api::BranchReader branches;
+    hal3::api::DnaReader dna;
+    vector<const hal3::api::Genome*> genomes;
+};
+
+static bool is_url(const string& path) {
+    return path.compare(0, 7, "http://") == 0 || path.compare(0, 8, "https://") == 0;
+}
+
+// A local alignment's format is told from the path: a directory is format 3, and a file by its
+// first bytes, those of a format 3 pack or manifest or else HAL's.  A URL is tried as format 3
+// first.
+static unique_ptr<AlignmentReader> open_alignment(const string& path, CLParser* options) {
+    if (is_url(path)) {
+        string format3Error;
+        try {
+            return unique_ptr<AlignmentReader>(new Format3Reader(path));
+        } catch (const exception& e) {
+            format3Error = e.what();
+        }
+        try {
+            return unique_ptr<AlignmentReader>(new HalReader(path, options));
+        } catch (const exception& e) {
+            throw runtime_error("cannot open " + path + " as HAL format 3 (" + format3Error +
+                                ") nor with HAL's API (" + e.what() + ")");
+        }
+    }
+    static const char packMagic[8] = {'\x89', 'H', 'A', 'L', '\r', '\n', '\x1a', '\n'};
+    static const string manifestMagic = "#hal-manifest 3";
+    bool format3 = false;
+    struct stat info;
+    if (stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+        format3 = true;
+    } else {
+        ifstream file(path, ios::binary);
+        char head[16];
+        file.read(head, sizeof(head));
+        const string initial(head, (size_t)file.gcount());
+        format3 = initial.compare(0, sizeof(packMagic), string(packMagic, sizeof(packMagic))) == 0 ||
+            initial.compare(0, manifestMagic.size(), manifestMagic) == 0;
+    }
+    if (format3) {
+        return unique_ptr<AlignmentReader>(new Format3Reader(path));
+    }
+    return unique_ptr<AlignmentReader>(new HalReader(path, options));
+}
+
+// the genomes that are leaves below a genome, in no particular order
+static void leaves_below(const AlignmentReader& alignment, size_t genome, vector<string>& leaves) {
+    if (alignment.children(genome).empty()) {
+        leaves.push_back(alignment.genome_name(genome));
+    }
+    for (size_t child : alignment.children(genome)) {
+        leaves_below(alignment, child, leaves);
+    }
+}
+
+// the deepest genome that is an ancestor (or one) of every genome given, which must not be none
+static size_t lowest_common_ancestor(const AlignmentReader& alignment, const vector<size_t>& genomes) {
+    // the first genome's path to the root, from the genome up
+    vector<size_t> path;
+    unordered_map<size_t, size_t> onPath;
+    for (int64_t genome = genomes.at(0); genome >= 0; genome = alignment.parent(genome)) {
+        onPath[genome] = path.size();
+        path.push_back(genome);
+    }
+    // each other genome meets that path somewhere: the highest meeting is the answer
+    size_t highest = 0;
+    for (size_t i = 1; i < genomes.size(); ++i) {
+        int64_t genome = genomes[i];
+        while (!onPath.count(genome)) {
+            genome = alignment.parent(genome);
+        }
+        highest = max(highest, onPath[genome]);
+    }
+    return path[highest];
+}
+
 static void initParser(CLParser* optionsParser) {
     optionsParser->addArgument("halFile", "input hal file");
     optionsParser->addOption("refGenomes",
@@ -116,14 +448,32 @@ static void initParser(CLParser* optionsParser) {
 
 }
 
-static void add_genome_threads(const Genome* genome,
-                               stPinchThreadSet* threads,
-                               vector<string>& IDToName,
-                               unordered_map<string, int64_t>& nameToID);
+// Every pinch thread is a sequence of a genome in the pinch graph.  The threads are numbered
+// genome by genome, so genome g's sequence s is thread threadOffset[g] + s (threadOffset[g] is -1
+// for a genome with no threads), and that thread is threads[threadOffset[g] + s].
+// threadToSequence says which sequence a thread number is.
+struct PinchThreads {
+    vector<int64_t> threadOffset;
+    vector<SequenceRef> threadToSequence;
+    vector<stPinchThread*> threads;
 
-static void pinch_genome(const Genome* genome,
-                         stPinchThreadSet* threads,
-                         const unordered_map<string, int64_t>& nameToID);
+    stPinchThread* thread(size_t genome, size_t sequence) const {
+        return threads.at(threadOffset.at(genome) + sequence);
+    }
+    const SequenceRef& sequence(int64_t thread) const {
+        if (thread < 0 || (uint64_t)thread >= threadToSequence.size()) {
+            throw runtime_error("[hal2vg] no hal sequence for pinch thread " + std::to_string(thread));
+        }
+        return threadToSequence[thread];
+    }
+};
+
+static void add_genome_threads(AlignmentReader& alignment, size_t genome,
+                               stPinchThreadSet* threadSet,
+                               PinchThreads& threads);
+
+static void pinch_genome(AlignmentReader& alignment, size_t genome,
+                         const PinchThreads& threads);
 
 // Pinching runs straight through mismatching bases, so a block can hold more than one base at
 // a position.  This separates them again: every block whose segments disagree anywhere is cut
@@ -131,42 +481,28 @@ static void pinch_genome(const Genome* genome,
 // per base.  It is what the column iterator used to do one SNP at a time, without needing a
 // column iterator, a set of every genome open at once, or a bit per base of every sequence.
 static void split_blocks_by_base(stPinchThreadSet* threadSet,
-                                 const vector<const Sequence*>& IDToSequence,
+                                 AlignmentReader& alignment,
+                                 const PinchThreads& threads,
                                  bool progress);
 
-// thread name (the id given to add_genome_threads) -> the hal sequence it came from
-static void build_id_to_sequence(AlignmentConstPtr alignment,
-                                 const vector<string>& threadGenomes,
-                                 const unordered_map<string, int64_t>& nameToID,
-                                 vector<const Sequence*>& IDToSequence);
-
-// Map a hal sequence to its pinch thread.  Doing this by name, as this used to, built a
-// std::string and hashed it for every base of every segment.  A sequence pointer is stable for
-// as long as its genome is open, which covers a whole pinch_genome call.
-static stPinchThread* thread_for_sequence(const Sequence* sequence,
-                                          stPinchThreadSet* threads,
-                                          const unordered_map<string, int64_t>& nameToID,
-                                          unordered_map<const Sequence*, stPinchThread*>& seqToThread);
-
 // both conversions make their paths here, so that they cannot disagree on how one is named
-static path_handle_t create_sequence_path(const Genome* genome,
-                                          const Sequence* sequence,
+static path_handle_t create_sequence_path(const string& genomeName,
+                                          const string& sequenceName,
                                           const vector<string>& refNames,
                                           MutablePathMutableHandleGraph& graph);
 
-static void pinch_to_handle(const Genome* genome,
-                            stPinchThreadSet* threadSet,
-                            const vector<string>& IDToName,
-                            const unordered_map<string, int64_t>& nameToID,
+static void pinch_to_handle(AlignmentReader& alignment, size_t genome,
+                            const PinchThreads& threads,
                             MutablePathMutableHandleGraph& graph,
                             const vector<string>& refNames);
 
 static void build_low_memory_plans(stPinchThreadSet* threadSet,
-                                   const vector<const Sequence*>& sequences,
+                                   AlignmentReader& alignment,
+                                   const PinchThreads& threads,
                                    LowMemoryPlans& plans, bool progress, size_t bufferBytes);
 
-static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* threadSet,
-                                        const unordered_map<string, int64_t>& nameToID,
+static void pinch_to_handle_low_memory(AlignmentReader& alignment, size_t genome,
+                                        const PinchThreads& threads,
                                         LowMemoryPlans& plans,
                                         MutablePathMutableHandleGraph& graph,
                                         const vector<string>& refNames);
@@ -225,10 +561,7 @@ int main(int argc, char** argv) {
         exit(1);
     }
     try {
-        AlignmentConstPtr alignment(openHalAlignment(halPath, &optionsParser));
-        if (alignment->getNumGenomes() == 0) {
-            throw hal_exception("input hal alignmenet is empty");
-        }
+        unique_ptr<AlignmentReader> alignment = open_alignment(halPath, &optionsParser);
 
         vector<string> refNames;
         if (refGenomes != "\"\"") {
@@ -240,13 +573,10 @@ int main(int argc, char** argv) {
         bool givenRoot = true;
         if (rootGenomeName == "\"\"") {
             givenRoot = false;
-            rootGenomeName = alignment->getRootName();
-            const Genome* rootGenome = alignment->openGenome(rootGenomeName);
-            if (rootGenome == NULL) {
-                throw hal_exception(string("Root genome, ") + rootGenomeName + 
-                                    ", not found in alignment");
-            }
-            alignment->closeGenome(rootGenome);
+            rootGenomeName = alignment->genome_name(alignment->root());
+        } else if (alignment->find_genome(rootGenomeName) < 0) {
+            throw hal_exception(string("Root genome, ") + rootGenomeName +
+                                ", not found in alignment");
         }
 
         vector<string> ignoreNames;
@@ -263,7 +593,8 @@ int main(int argc, char** argv) {
             givenTargets = true;
         } else {
             // otherwise, we take all the leaves below the root, except any that are ignored
-            vector<string> leafNames = alignment->getLeafNamesBelow(rootGenomeName);
+            vector<string> leafNames;
+            leaves_below(*alignment, alignment->find_genome(rootGenomeName), leafNames);
             for (size_t i = 0; i < leafNames.size(); ++i) {
                 if (!std::binary_search(ignoreNames.begin(), ignoreNames.end(), leafNames[i])) {
                     targetNames.push_back(leafNames[i]);
@@ -274,28 +605,35 @@ int main(int argc, char** argv) {
         std::sort(targetNames.begin(), targetNames.end());
 
         // keep track of internal nodes needed to transitively align our targets
-        vector<string> spanningNames;        
-        set<const Genome*> targetSet;
+        vector<string> spanningNames;
+        vector<size_t> targets;
         for (size_t i = 0; i < targetNames.size(); ++i) {
-            const Genome* targetGenome = alignment->openGenome(targetNames[i]);
-            if (targetGenome == NULL) {
-                throw hal_exception(string("Target genome, ") + targetNames[i] + 
+            const int64_t targetGenome = alignment->find_genome(targetNames[i]);
+            if (targetGenome < 0) {
+                throw hal_exception(string("Target genome, ") + targetNames[i] +
                                     ", not found in alignment");
             }
-            targetSet.insert(targetGenome);
+            targets.push_back(targetGenome);
         }
-        const Genome* rootGenome = getLowestCommonAncestor(targetSet);
-        set<const Genome*> targetSetCpy = targetSet;
-        getGenomesInSpanningTree(targetSetCpy, targetSet);
+        if (targets.empty()) {
+            throw hal_exception("no target genomes: every leaf below " + rootGenomeName + " is ignored");
+        }
+        const size_t lca = lowest_common_ancestor(*alignment, targets);
         if (!givenRoot) {
             // update our root if it wasn't user-specified
-            rootGenomeName = rootGenome->getName();
+            rootGenomeName = alignment->genome_name(lca);
         }
-        for (set<const Genome*>::iterator i = targetSet.begin(); i != targetSet.end(); ++i) {
-            if ((*i)->getNumChildren() > 0) {
-                spanningNames.push_back((*i)->getName());
+        // the spanning tree: every genome on the way from a target up to their common ancestor
+        set<size_t> spanning;
+        for (size_t target : targets) {
+            for (size_t genome = target; spanning.insert(genome).second && genome != lca;
+                 genome = alignment->parent(genome)) {
             }
-            alignment->closeGenome(*i);            
+        }
+        for (size_t genome : spanning) {
+            if (!alignment->children(genome).empty()) {
+                spanningNames.push_back(alignment->genome_name(genome));
+            }
         }
         std::sort(spanningNames.begin(), spanningNames.end());
         
@@ -324,88 +662,71 @@ int main(int argc, char** argv) {
             }
         }
 
-        // map Sequence pointers to integers (assumes sequence pointers stable within hal)
-        vector<string> IDToName;
-        unordered_map<string, int64_t> nameToID;
-        
         // start up our pinch graph
         stPinchThreadSet* threadSet = stPinchThreadSet_construct();
-        
-        const Genome* parentGenome = nullptr;
-        string parentName;
+        PinchThreads threads;
+        threads.threadOffset.assign(alignment->num_genomes(), -1);
 
-        deque<string> queue = {rootGenomeName};
+        const size_t rootGenome = alignment->find_genome(rootGenomeName);
+        deque<size_t> queue = {rootGenome};
 
-        vector<string> pinchGenomes;
-        vector<string> threadGenomes;
-        
+        vector<size_t> pinchGenomes;
+        vector<size_t> threadGenomes;
+
         while (!queue.empty()) {
-            string genomeName = queue.front();
+            const size_t genome = queue.front();
             queue.pop_front();
+            const string& genomeName = alignment->genome_name(genome);
+            const bool hasParent = alignment->parent(genome) >= 0;
 
             // we have a target set, and this genome isn't in it, and this genome isn't needed to span it
             // so we can ignore it completely
             bool ignoreGenome = (!std::binary_search(targetNames.begin(), targetNames.end(), genomeName) &&
                                  !std::binary_search(spanningNames.begin(), spanningNames.end(), genomeName) &&
-                                 genomeName != rootGenomeName);
-            
-            const Genome* genome = alignment->openGenome(genomeName);
-            string curParent = alignment->getParentName(genomeName);
+                                 genome != rootGenome);
 
             // add the genome sequences as threads
             if (!ignoreGenome) {
-                if (progress && !(!curParent.empty() && genomeName != rootGenomeName)) {
-                    cerr << "adding threads from " << genome->getName() << endl;
+                if (progress && !(hasParent && genome != rootGenome)) {
+                    cerr << "adding threads from " << genomeName << endl;
                 }
-                add_genome_threads(genome, threadSet, IDToName, nameToID);
-                threadGenomes.push_back(genomeName);
+                add_genome_threads(*alignment, genome, threadSet, threads);
+                threadGenomes.push_back(genome);
             }
 
-            if (!ignoreGenome && !curParent.empty() && genomeName != rootGenomeName) {
-                // load up the parent genome if it's not already open, taking care
-                // to only ever have one parent open at a time
-                if (curParent != parentName) {
-                    if (parentGenome != nullptr) {
-                        alignment->closeGenome(parentGenome);
-                    }
-                    parentName = curParent;
-                    parentGenome = alignment->openGenome(parentName);
-                }
-
+            if (!ignoreGenome && hasParent && genome != rootGenome) {
                 // pinching must now be done in second pass, so we queue up the genome here
-                pinchGenomes.push_back(genome->getName());
+                pinchGenomes.push_back(genome);
             }
 
-            // recurse on children                
-            vector<string> childs = alignment->getChildNames(genomeName);
-            for (size_t i = 0; i < childs.size(); ++i) {
-                queue.push_back(childs[i]);
+            // recurse on children
+            for (size_t child : alignment->children(genome)) {
+                queue.push_back(child);
             }
 
-            // todo: this logic not very efficient for normal (ie non-star trees)
-            alignment->closeGenome(genome);
-
+            alignment->release(genome);
         }
 
-        if (parentGenome != nullptr) {
-            alignment->closeGenome(parentGenome);
+        // a thread number is looked up once here, and never while pinching
+        threads.threads.resize(threads.threadToSequence.size());
+        for (size_t i = 0; i < threads.threads.size(); ++i) {
+            threads.threads[i] = stPinchThreadSet_getThread(threadSet, i);
         }
 
         // do all the pinching
-        for (size_t i = 0; i < pinchGenomes.size(); ++i) {
-            
+        for (size_t genome : pinchGenomes) {
+
             // pinch the child with its parent
             if (progress) {
-                cerr << "pinching " << pinchGenomes[i] << endl;
+                cerr << "pinching " << alignment->genome_name(genome) << endl;
             }
-            const Genome* genome = alignment->openGenome(pinchGenomes[i]);
-            pinch_genome(genome, threadSet, nameToID);
+            pinch_genome(*alignment, genome, threads);
             if (!legacyConversion && !halInMemory) {
                 // nothing reads it again until the splits are planned, which reopens it.
                 // closing it gives back its hdf5 chunk caches, but a genome held in memory
                 // would only be read in again whole, for no saving: its arrays are back by
                 // the time the splits are planned, which is where memory peaks
-                alignment->closeGenome(genome);
+                alignment->release(genome);
             }
         }
 
@@ -421,19 +742,16 @@ int main(int argc, char** argv) {
         // made from that plan as the graph is built.  --legacyConversion instead separates
         // them in the pinch graph and then merges again, which costs a pinch segment for
         // every member of every piece and so far more memory
-        vector<const Sequence*> IDToSequence;
         LowMemoryPlans lowMemoryPlans;
-        build_id_to_sequence(alignment, threadGenomes, nameToID, IDToSequence);
         if (legacyConversion) {
-            split_blocks_by_base(threadSet, IDToSequence, progress);
+            split_blocks_by_base(threadSet, *alignment, threads, progress);
             stPinchThreadSet_joinTrivialBoundaries(threadSet);
         } else {
-            build_low_memory_plans(threadSet, IDToSequence, lowMemoryPlans, progress, baseBuffer);
+            build_low_memory_plans(threadSet, *alignment, threads, lowMemoryPlans, progress, baseBuffer);
             // Plans own no HAL pointers. Release the cohort's arrays now; conversion
             // reopens only its current genome and reads one sequence at a time.
-            IDToSequence.clear();
-            for (const string& name : threadGenomes) {
-                alignment->closeGenome(alignment->openGenome(name));
+            for (size_t genome : threadGenomes) {
+                alignment->release(genome);
             }
         }
 
@@ -466,12 +784,11 @@ int main(int argc, char** argv) {
         }
 
         // start iterating over the genomes again in order to export to handle graph
-        vector<string> threadedNames = threadGenomes;
-        std::sort(threadedNames.begin(), threadedNames.end());
-        queue = {rootGenomeName};
+        queue = {rootGenome};
         while (!queue.empty()) {
-            string genomeName = queue.front();
+            const size_t genome = queue.front();
             queue.pop_front();
+            const string& genomeName = alignment->genome_name(genome);
 
             // skip it if
             // it's an ancestor and we don't want ancestors or
@@ -479,29 +796,31 @@ int main(int argc, char** argv) {
             // if it's on the ignore list or
             // it has no threads, like an ancestor whose descendants are all ignored, which is
             // not needed to span the targets: there is nothing in the pinch graph to convert
-            bool ignoreGenome = ((noAncestors && !alignment->getChildNames(genomeName).empty()) ||
+            bool ignoreGenome = ((noAncestors && !alignment->children(genome).empty()) ||
                                  (givenTargets && !std::binary_search(targetNames.begin(), targetNames.end(), genomeName)) ||
                                  (std::binary_search(ignoreNames.begin(), ignoreNames.end(), genomeName)) ||
-                                 !std::binary_search(threadedNames.begin(), threadedNames.end(), genomeName));
+                                 threads.threadOffset[genome] < 0);
             if (!ignoreGenome) {
-                const Genome* genome = alignment->openGenome(genomeName);
-
                 if (progress) {
-                    cerr << "converting " << genomeName << " with " << genome->getNumSequences()
-                         << " sequences and total length " << genome->getSequenceLength() << endl;
+                    const size_t numSequences = alignment->num_sequences(genome);
+                    int64_t totalLength = 0;
+                    for (size_t i = 0; i < numSequences; ++i) {
+                        totalLength += alignment->sequence_length(genome, i);
+                    }
+                    cerr << "converting " << genomeName << " with " << numSequences
+                         << " sequences and total length " << totalLength << endl;
                 }
                 if (legacyConversion) {
-                    pinch_to_handle(genome, threadSet, IDToName, nameToID, *graph, refNames);
+                    pinch_to_handle(*alignment, genome, threads, *graph, refNames);
                 } else {
-                    pinch_to_handle_low_memory(genome, threadSet, nameToID, lowMemoryPlans, *graph, refNames);
+                    pinch_to_handle_low_memory(*alignment, genome, threads, lowMemoryPlans, *graph, refNames);
                 }
 
-                alignment->closeGenome(genome);
+                alignment->release(genome);
             }
-            
-            vector<string> childs = alignment->getChildNames(genomeName);
-            for (size_t i = 0; i < childs.size(); ++i) {
-                queue.push_back(childs[i]);
+
+            for (size_t child : alignment->children(genome)) {
+                queue.push_back(child);
             }
         }
 
@@ -511,7 +830,7 @@ int main(int argc, char** argv) {
         stPinchThreadSet_destruct(threadSet);
 
         // free the hal
-        alignment = AlignmentConstPtr();
+        alignment.reset();
 
         // chop
         if (maxNodeLength > 0) {
@@ -535,141 +854,51 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-// Add every sequence from the genome into the pinch graph
-void add_genome_threads(const Genome* genome,
-                        stPinchThreadSet* threads,
-                        vector<string>& IDToName,
-                        unordered_map<string, int64_t>& nameToID) {
-    
-    for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
-        const Sequence *sequence = seqIt->getSequence();
-        hal_size_t seqLen = sequence->getSequenceLength();
-        string name = sequence->getFullName();
-        // update lookups to map hal sequence to numeric id
-        int64_t seqID = IDToName.size(); 
-        nameToID[name] = seqID;
-        IDToName.push_back(name);
+// Add every sequence from the genome into the pinch graph, numbered on from the threads there
+void add_genome_threads(AlignmentReader& alignment, size_t genome,
+                        stPinchThreadSet* threadSet,
+                        PinchThreads& threads) {
+    threads.threadOffset.at(genome) = threads.threadToSequence.size();
+    const size_t numSequences = alignment.num_sequences(genome);
+    for (size_t i = 0; i < numSequences; ++i) {
+        int64_t seqID = threads.threadToSequence.size();
+        int64_t seqLen = alignment.sequence_length(genome, i);
+        threads.threadToSequence.push_back(SequenceRef{(uint32_t)genome, (uint32_t)i});
         // add to thread set
 #ifdef debug
-        cerr << "Adding sequence " << name << " as thread " << seqID << " with length " << seqLen << endl;
+        cerr << "Adding sequence " << alignment.sequence_name(genome, i) << " as thread " << seqID << " with length " << seqLen << endl;
 #endif
-        stPinchThreadSet_addThread(threads, seqID, 0, seqLen);
+        stPinchThreadSet_addThread(threadSet, seqID, 0, seqLen);
     }
 }
 
 // Use exact pairwise alginments from genome to its parent to make the pinch graph
-void pinch_genome(const Genome* genome,
-                  stPinchThreadSet* threads,
-                  const unordered_map<string, int64_t>& nameToID) {
+void pinch_genome(AlignmentReader& alignment, size_t genome,
+                  const PinchThreads& threads) {
+    const int64_t parent = alignment.parent(genome);
+    if (parent < 0 || threads.threadOffset.at(genome) < 0 || threads.threadOffset.at(parent) < 0) {
+        throw runtime_error("[hal2vg] no pinch threads for " + alignment.genome_name(genome) +
+                            (parent < 0 ? string() : " or its parent " + alignment.genome_name(parent)));
+    }
+    stPinchThread* const* childThreads = threads.threads.data() + threads.threadOffset[genome];
+    stPinchThread* const* parentThreads = threads.threads.data() + threads.threadOffset[parent];
+    const size_t numChild = alignment.num_sequences(genome);
+    const size_t numParent = alignment.num_sequences(parent);
 
-    TopSegmentIteratorPtr topIt = genome->getTopSegmentIterator();
-    BottomSegmentIteratorPtr botIt = genome->getParent()->getBottomSegmentIterator();
-
-    // avoid thread set lookups
-    const Sequence* topSeq = nullptr;
-    const Sequence* botSeq = nullptr;
-    stPinchThread* topThread = nullptr;
-    stPinchThread* botThread = nullptr;
-    // sequence -> thread, so that no base costs a name lookup
-    unordered_map<const Sequence*, stPinchThread*> seqToThread;
-
-    // merge up consecutive segments for fewer pinches
-    stPinchThread* prevTopThread = nullptr;
-    stPinchThread* prevBotThread = nullptr;
-    hal_index_t prevStart1 = -1;
-    hal_index_t prevStart2 = -1;
-    hal_index_t prevLength = -1;
-    bool prevReversed = false;
-    
-    for (; not topIt->atEnd(); topIt->toRight()) {
-        if (topIt->tseg()->hasParent()) {
-            botIt->toParent(topIt);
-
-            if (topIt->tseg()->getSequence() != topSeq) {
-                topSeq = topIt->tseg()->getSequence();
-                topThread = thread_for_sequence(topSeq, threads, nameToID, seqToThread);
-            }
-            if (botIt->bseg()->getSequence() != botSeq) {
-                botSeq = botIt->bseg()->getSequence();
-                botThread = thread_for_sequence(botSeq, threads, nameToID, seqToThread);
-            }
-
-            // the whole aligned segment is pinched, mismatching bases included; blocks
-            // holding more than one base are separated afterwards by split_blocks_by_base.
-            // not comparing the bases means neither sequence has to be read here at all
-            hal_index_t length = topIt->getLength();
-            hal_index_t start1 = topIt->tseg()->getStartPosition() - topSeq->getStartPosition();
-            hal_index_t start2;
-            if (!botIt->getReversed()) {
-                start2 = botIt->bseg()->getStartPosition() - botSeq->getStartPosition();
-            } else {
-                start2 = botIt->bseg()->getEndPosition() - length + 1 - botSeq->getStartPosition();
-            }
-
-            // are we dealing with two consecutive segments?
-            bool canMerge = topThread == prevTopThread &&
-                botThread == prevBotThread &&
-                start1 == prevStart1 + prevLength &&
-                botIt->getReversed() == prevReversed &&
-                ((!prevReversed && start2 == prevStart2 + prevLength) ||
-                 (prevReversed && start2 + length == prevStart2));
-
-            if (canMerge) {
-                // if consecutive, just merge
-                prevLength += length;
-                if (botIt->getReversed()) {
-                    prevStart2 = start2;
-                }
-            } else {
-                // otherwise
-                if (prevTopThread != nullptr) {
-                    // pinch the last segment
-                    stPinchThread_pinch(prevTopThread,
-                                        prevBotThread,
-                                        prevStart1,
-                                        prevStart2,
-                                        prevLength,
-                                        !prevReversed);
-                }
-                // and update our previous
-                prevTopThread = topThread;
-                prevBotThread = botThread;
-                prevStart1 = start1;
-                prevStart2 = start2;
-                prevLength = length;
-                prevReversed = botIt->getReversed();
-            }
+    alignment.scan_runs(genome, [&](const AlignedRun& run) {
+        if (run.childSequence >= numChild || run.parentSequence >= numParent) {
+            throw runtime_error("[hal2vg] a run of " + alignment.genome_name(genome) + " is on no sequence");
         }
-    }
-    // do that last pinch
-    if (prevTopThread != nullptr) {
-        stPinchThread_pinch(prevTopThread,
-                            prevBotThread,
-                            prevStart1,
-                            prevStart2,
-                            prevLength,
-                            !prevReversed);
-    }
-}
-
-void build_id_to_sequence(AlignmentConstPtr alignment,
-                          const vector<string>& threadGenomes,
-                          const unordered_map<string, int64_t>& nameToID,
-                          vector<const Sequence*>& IDToSequence) {
-    IDToSequence.assign(nameToID.size(), nullptr);
-    for (size_t i = 0; i < threadGenomes.size(); ++i) {
-        const Genome* genome = alignment->openGenome(threadGenomes[i]);
-        for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
-            const Sequence* sequence = seqIt->getSequence();
-            unordered_map<string, int64_t>::const_iterator found = nameToID.find(sequence->getFullName());
-            if (found != nameToID.end()) {
-                // not the iterator's pointer: an mmap hal's iterator hands out its own member,
-                // which is gone once the iterator moves on.  the genome's own object lasts as
-                // long as the genome is open, in either format
-                IDToSequence.at(found->second) = genome->getSequence(sequence->getName());
-            }
-        }
-    }
+        // the whole aligned run is pinched, mismatching bases included; blocks holding more
+        // than one base are separated afterwards.  not comparing the bases means neither
+        // sequence has to be read here at all
+        stPinchThread_pinch(childThreads[run.childSequence],
+                            parentThreads[run.parentSequence],
+                            run.childStart,
+                            run.parentStart,
+                            run.length,
+                            !run.reversed);
+    });
 }
 
 // one segment of the block being examined
@@ -701,7 +930,8 @@ inline void grouping_at(const vector<BlockMember>& members, int64_t position, ve
 }
 
 void split_blocks_by_base(stPinchThreadSet* threadSet,
-                          const vector<const Sequence*>& IDToSequence,
+                          AlignmentReader& alignment,
+                          const PinchThreads& threads,
                           bool progress) {
 
     vector<BlockMember> members;
@@ -732,16 +962,12 @@ void split_blocks_by_base(stPinchThreadSet* threadSet,
         stPinchBlockIt blockIt = stPinchBlock_getSegmentIterator(block);
         for (stPinchSegment* member = stPinchBlockIt_getNext(&blockIt); member != NULL;
              member = stPinchBlockIt_getNext(&blockIt)) {
-            const Sequence* sequence = IDToSequence.at(stPinchSegment_getName(member));
-            if (sequence == nullptr) {
-                throw runtime_error("[hal2vg] no hal sequence for pinch thread " +
-                                    std::to_string(stPinchSegment_getName(member)));
-            }
+            const SequenceRef& sequence = threads.sequence(stPinchSegment_getName(member));
             BlockMember entry;
             entry.thread = stPinchSegment_getThread(member);
             entry.start = stPinchSegment_getStart(member);
             entry.forward = stPinchSegment_getBlockOrientation(member) != 0;
-            sequence->getSubString(buffer, entry.start, length);
+            alignment.fetch(sequence.genome, sequence.sequence, entry.start, length, buffer);
             for (size_t i = 0; i < buffer.size(); ++i) {
                 buffer[i] = upper_base(buffer[i]);
             }
@@ -812,41 +1038,23 @@ void split_blocks_by_base(stPinchThreadSet* threadSet,
     }
 }
 
-static stPinchThread* thread_for_sequence(const Sequence* sequence,
-                                          stPinchThreadSet* threads,
-                                          const unordered_map<string, int64_t>& nameToID,
-                                          unordered_map<const Sequence*, stPinchThread*>& seqToThread) {
-    unordered_map<const Sequence*, stPinchThread*>::const_iterator cached = seqToThread.find(sequence);
-    if (cached != seqToThread.end()) {
-        return cached->second;
-    }
-    unordered_map<string, int64_t>::const_iterator found = nameToID.find(sequence->getFullName());
-    if (found == nameToID.end()) {
-        // operator[] used to insert a 0 here and carry on pinching the wrong thread
-        throw runtime_error("[hal2vg] no pinch thread for sequence " + sequence->getFullName());
-    }
-    stPinchThread* thread = stPinchThreadSet_getThread(threads, found->second);
-    seqToThread[sequence] = thread;
-    return thread;
-}
-
 // make the (still empty) path for a hal sequence: a reference path if its genome is one of
 // refNames, or if there are no refNames at all, and a haplotype path otherwise
-path_handle_t create_sequence_path(const Genome* genome,
-                                   const Sequence* sequence,
+path_handle_t create_sequence_path(const string& genomeName,
+                                   const string& sequenceName,
                                    const vector<string>& refNames,
                                    MutablePathMutableHandleGraph& graph) {
     PathSense sense = PathSense::REFERENCE;
-    if (!refNames.empty() && !std::binary_search(refNames.begin(), refNames.end(), genome->getName())) {
+    if (!refNames.empty() && !std::binary_search(refNames.begin(), refNames.end(), genomeName)) {
         sense = PathSense::HAPLOTYPE;
     }
 
     // cactus_graphmap_split can make paths like contig_sub_1_3.  here we convert that
     // into a format vg can (sometimes) understand contig[1-3].
     // (the reason we go through this is that assembly hubs can't handle any special characters apparently)
-    string parsed_name = sequence->getName();
+    string parsed_name = sequenceName;
     subrange_t subpath = resolve_subpath_naming(parsed_name);
-    string parsed_genome_name = genome->getName();
+    string parsed_genome_name = genomeName;
     size_t haplotype = resolve_haplotype_naming(parsed_genome_name);
     if (haplotype == PathMetadata::NO_HAPLOTYPE) {
         haplotype = 0;
@@ -861,21 +1069,22 @@ path_handle_t create_sequence_path(const Genome* genome,
 }
 
 // create nodes and edges for a genome using the pinch graph
-void pinch_to_handle(const Genome* genome,
-                     stPinchThreadSet* threadSet,
-                     const vector<string>& IDToName,
-                     const unordered_map<string, int64_t>& nameToID,
+void pinch_to_handle(AlignmentReader& alignment, size_t genome,
+                     const PinchThreads& threads,
                      MutablePathMutableHandleGraph& graph,
                      const vector<string>& refNames) {
 
     // iterate over the sequences of the genome
-    for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); not seqIt->atEnd(); seqIt->toNext()) {
-        const Sequence *sequence = seqIt->getSequence();
-        int64_t seqID = nameToID.find(sequence->getFullName())->second;
-        stPinchThread* thread = stPinchThreadSet_getThread(threadSet, seqID);
+    const string& genomeName = alignment.genome_name(genome);
+    const size_t numSequences = alignment.num_sequences(genome);
+    for (size_t sequence = 0; sequence < numSequences; ++sequence) {
+        const string sequenceName = alignment.sequence_name(genome, sequence);
+        // as HAL names it
+        const string fullName = genomeName + "." + sequenceName;
+        stPinchThread* thread = threads.thread(genome, sequence);
 
         // create the path
-        path_handle_t pathHandle = create_sequence_path(genome, sequence, refNames, graph);
+        path_handle_t pathHandle = create_sequence_path(genomeName, sequenceName, refNames, graph);
         // the converted path gets checked against the hal a segment at a time (below), so we
         // never need to hold a whole chromosome's worth of sequence in memory to do it
         size_t pathLength = 0;
@@ -899,7 +1108,7 @@ void pinch_to_handle(const Genome* genome,
 
             // get the segment's dna sequence from the hal.  seqString stays in path
             // orientation; nodeString is the block-relative orientation that gets stored
-            sequence->getSubString(seqString, segStart, stPinchSegment_getLength(seg));
+            alignment.fetch(genome, sequence, segStart, stPinchSegment_getLength(seg), seqString);
 
             // have we already converted this block?
             uint64_t blockPacked = block != nullptr ? stPinchBlock_getNumSupportingHomologies(block) : 0;
@@ -929,7 +1138,7 @@ void pinch_to_handle(const Genome* genome,
                                                sequence_checksum(reversed ? nodeString : seqString)));
                 }
 #ifdef debug
-                cerr << "created node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
+                cerr << "created node " << graph.get_id(handle) << " for block " << block << " from " << fullName << " at " << segStart
                      << " rev=" << reversed << " len=" << seqString.length()
                      << endl;
                 cerr << "node seq " << graph.get_sequence(handle) << endl;
@@ -938,7 +1147,7 @@ void pinch_to_handle(const Genome* genome,
                 // yes: the id is stored on the block itself
                 handle = graph.get_handle(blockNode);
 #ifdef debug
-                cerr << "found node " << graph.get_id(handle) << " for block " << block << " from " << sequence->getFullName() << " at " << segStart
+                cerr << "found node " << graph.get_id(handle) << " for block " << block << " from " << fullName << " at " << segStart
                      << " rev=" << reversed << " len=" << seqString.length()
                      << endl;
                 cerr << "node seq " << graph.get_sequence(handle) << endl;
@@ -985,7 +1194,7 @@ void pinch_to_handle(const Genome* genome,
                     if (!lengthAgrees) {
                         throw runtime_error("node " + std::to_string(blockNode) + " has length " +
                                             std::to_string(nodeString.size()) + " but " +
-                                            sequence->getFullName() + " covers " +
+                                            fullName + " covers " +
                                             std::to_string(seqString.size()) + " bases of it at " +
                                             std::to_string(segStart));
                     }
@@ -999,7 +1208,7 @@ void pinch_to_handle(const Genome* genome,
                     }
                     if (numMismatches == 0) {
                         throw runtime_error("checksum mismatch on node " + std::to_string(blockNode) +
-                                            " for " + sequence->getFullName() + " at " +
+                                            " for " + fullName + " at " +
                                             std::to_string(segStart) + ", but its bases agree");
                     }
                 }
@@ -1017,13 +1226,13 @@ void pinch_to_handle(const Genome* genome,
         }
 
         // make sure the path we added is the same as the hal
-        if (pathLength != sequence->getSequenceLength()) {
-            throw runtime_error("Incorrect length in coverted path for " + sequence->getFullName() + ": " + std::to_string(pathLength) +
-                                ". Should be: " + std::to_string(sequence->getSequenceLength()));
+        if ((int64_t)pathLength != alignment.sequence_length(genome, sequence)) {
+            throw runtime_error("Incorrect length in coverted path for " + fullName + ": " + std::to_string(pathLength) +
+                                ". Should be: " + std::to_string(alignment.sequence_length(genome, sequence)));
         }
         if (numMismatches > 0) {
             stringstream msg;
-            msg << numMismatches << " mismatches found in converted path for " << sequence->getFullName() << ":\n";
+            msg << numMismatches << " mismatches found in converted path for " << fullName << ":\n";
             for (size_t i = 0; i < mismatches.size(); ++i) {
                 msg << " path[" << mismatches[i].first << "]=" << mismatches[i].second.first
                     << ". should be " << mismatches[i].second.second << "\n";
@@ -1111,7 +1320,8 @@ size_t resolve_haplotype_naming(string& genome_name) {
 }
 
 static void build_low_memory_plans(stPinchThreadSet* threadSet,
-                                   const vector<const Sequence*>& IDToSequence,
+                                   AlignmentReader& alignment,
+                                   const PinchThreads& threads,
                                    LowMemoryPlans& plans, bool progress, size_t bufferBytes) {
     uint64_t visited = 0, virtualNodes = 0, labelBytes = 0, storageBytes = 0;
     stPinchThreadSetBlockIt blockIt = stPinchThreadSet_getBlockIt(threadSet);
@@ -1133,16 +1343,12 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
         const size_t degree = result->members.size();
         const uint64_t length = stPinchBlock_getLength(block);
         const size_t window = max(size_t(1), bufferBytes / degree);
-        vector<const Sequence*> sequences(degree);
+        vector<SequenceRef> sequences(degree);
         vector<int64_t> starts(degree);
         vector<bool> forward(degree);
         vector<string> bases(degree);
         for (size_t i = 0; i < degree; ++i) {
-            sequences[i] = IDToSequence.at(stPinchSegment_getName(result->members[i]));
-            if (sequences[i] == nullptr) {
-                throw runtime_error("[hal2vg] no hal sequence for pinch thread " +
-                                    std::to_string(stPinchSegment_getName(result->members[i])));
-            }
+            sequences[i] = threads.sequence(stPinchSegment_getName(result->members[i]));
             starts[i] = stPinchSegment_getStart(result->members[i]);
             forward[i] = stPinchSegment_getBlockOrientation(result->members[i]) != 0;
         }
@@ -1154,7 +1360,7 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
             const size_t count = min<uint64_t>(window, length - begin);
             for (size_t i = 0; i < degree; ++i) {
                 const uint64_t start = starts[i] + (forward[i] ? begin : length - begin - count);
-                sequences[i]->getSubString(bases[i], start, count);
+                alignment.fetch(sequences[i].genome, sequences[i].sequence, start, count, bases[i]);
                 for (char& base : bases[i]) base = upper_base(base);
                 if (!forward[i]) reverseComplement(bases[i]);
             }
@@ -1201,18 +1407,22 @@ static void build_low_memory_plans(stPinchThreadSet* threadSet,
     }
 }
 
-static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* threadSet,
-                                        const unordered_map<string, int64_t>& nameToID,
+static void pinch_to_handle_low_memory(AlignmentReader& alignment, size_t genome,
+                                        const PinchThreads& threads,
                                         LowMemoryPlans& plans,
                                         MutablePathMutableHandleGraph& graph,
                                         const vector<string>& refNames) {
-    for (SequenceIteratorPtr seqIt = genome->getSequenceIterator(); !seqIt->atEnd(); seqIt->toNext()) {
-        const Sequence* sequence = seqIt->getSequence();
-        path_handle_t path = create_sequence_path(genome, sequence, refNames, graph);
-        stPinchThread* thread = stPinchThreadSet_getThread(threadSet, nameToID.at(sequence->getFullName()));
+    const string& genomeName = alignment.genome_name(genome);
+    const size_t numSequences = alignment.num_sequences(genome);
+    for (size_t sequence = 0; sequence < numSequences; ++sequence) {
+        const string sequenceName = alignment.sequence_name(genome, sequence);
+        // as HAL names it
+        const string fullName = genomeName + "." + sequenceName;
+        path_handle_t path = create_sequence_path(genomeName, sequenceName, refNames, graph);
+        stPinchThread* thread = threads.thread(genome, sequence);
         // One chromosome string avoids an HDF5 iterator setup for every output step.
         string dna;
-        sequence->getString(dna);
+        alignment.fetch(genome, sequence, 0, alignment.sequence_length(genome, sequence), dna);
         uint64_t pathLength = 0;
         bool havePrevious = false;
         handle_t previous;
@@ -1220,7 +1430,7 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
             // the one empty interval is an empty sequence's: its thread is a single segment of
             // length 0, which --legacyConversion makes into an empty node, and so does this
             if (start > dna.size() || length > dna.size() - start || (length == 0 && !dna.empty())) {
-                throw runtime_error("invalid path interval for " + sequence->getFullName());
+                throw runtime_error("invalid path interval for " + fullName);
             }
             string bases = dna.substr(start, length);
             if (reversed) reverseComplement(bases);
@@ -1237,7 +1447,7 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
             } else {
                 handle = graph.get_handle(id);
                 if (graph.get_length(handle) != length || unpack_block_checksum(packed) != checksum) {
-                    throw runtime_error("converted path disagrees with the hal for " + sequence->getFullName() +
+                    throw runtime_error("converted path disagrees with the hal for " + fullName +
                                         " at " + std::to_string(start));
                 }
             }
@@ -1283,7 +1493,7 @@ static void pinch_to_handle_low_memory(const Genome* genome, stPinchThreadSet* t
             segmentStart += length;
         }
         if (pathLength != dna.size() || segmentStart != dna.size()) {
-            throw runtime_error("Incorrect length in converted path for " + sequence->getFullName());
+            throw runtime_error("Incorrect length in converted path for " + fullName);
         }
     }
 }
